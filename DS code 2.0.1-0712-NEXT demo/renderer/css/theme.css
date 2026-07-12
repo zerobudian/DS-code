@@ -1,0 +1,72 @@
+/* DScode V2 — 设计令牌 + 深色模式 */
+
+:root {
+  --bg: #F8F9FB;
+  --card: #FFFFFF;
+  --text: #111827;
+  --text-2: #374151;
+  --text-3: #6B7280;
+  --text-4: #9CA3AF;
+  --surface: #F0F2F5;
+  --accent: #3B82F6;
+  --accent-hover: #2563EB;
+  --accent-light: #DBEAFE;
+  --border: #E5E7EB;
+  --divider: #F3F4F6;
+  --success: #10B981;
+  --danger: #EF4444;
+  --code-bg: #F3F4F6;
+  --reasoning-text: #6B7280;
+  --scrollbar: #D1D5DB;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 20px;
+  --font: -apple-system, "SF Pro Display", "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-code: "SF Mono", Menlo, Consolas, monospace;
+}
+
+[data-theme="dark"] {
+  --bg: #0F172A;
+  --card: #1E293B;
+  --text: #F1F5F9;
+  --text-2: #CBD5E1;
+  --text-3: #94A3B8;
+  --text-4: #64748B;
+  --surface: #1A2332;
+  --accent: #60A5FA;
+  --accent-hover: #3B82F6;
+  --accent-light: #1E3A5F;
+  --border: #334155;
+  --divider: #1E293B;
+  --success: #34D399;
+  --danger: #F87171;
+  --code-bg: #1A2332;
+  --reasoning-text: #94A3B8;
+  --scrollbar: #334155;
+  --shadow: 0 1px 3px rgba(0,0,0,0.25);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--font);
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+  height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-4); }

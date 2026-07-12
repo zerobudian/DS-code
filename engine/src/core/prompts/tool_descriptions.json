@@ -1,0 +1,1611 @@
+[
+  {
+    "name": "create_file",
+    "description": "Create or overwrite a text file (relative to sandbox.work_dir). UTF-8 code/config only; do not write large binaries.",
+    "fields": [
+      {
+        "key": "filename",
+        "type": "string",
+        "required": true,
+        "example": "src/utils/helpers.py",
+        "note": "relative path; 'path' is an alias"
+      },
+      {
+        "key": "path",
+        "type": "string",
+        "required": false,
+        "example": "src/utils/helpers.py",
+        "note": "alias of filename"
+      },
+      {
+        "key": "content",
+        "type": "string",
+        "required": true,
+        "example": "def hello(): return 'hello'"
+      }
+    ],
+    "returns": "(ok, message). success message. Triggers the on_edit_apply_request confirmation hook."
+  },
+  {
+    "name": "read_file",
+    "description": "Read the contents of a text file inside the sandbox. Suggest reading right after create_file / edit_file to verify the result.",
+    "fields": [
+      {
+        "key": "filename",
+        "type": "string",
+        "required": true,
+        "example": "src/utils/helpers.py",
+        "note": "'path' is an alias"
+      },
+      {
+        "key": "path",
+        "type": "string",
+        "required": false,
+        "example": "src/utils/helpers.py"
+      }
+    ],
+    "returns": "(ok, message). message is the file contents (size-limited, ~64KB)."
+  },
+  {
+    "name": "modify_file",
+    "description": "Equivalent to create_file: write a file by overwriting. Triggers on_edit_apply_request so the user can diff.",
+    "fields": [
+      {
+        "key": "filename",
+        "type": "string",
+        "required": true,
+        "example": "src/utils/helpers.py",
+        "note": "'path' is an alias"
+      },
+      {
+        "key": "path",
+        "type": "string",
+        "required": false,
+        "example": "src/utils/helpers.py"
+      },
+      {
+        "key": "content",
+        "type": "string",
+        "required": true,
+        "example": "def hello(): return 'hi'"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "mark_delete",
+    "description": "Mark a file as pending deletion (equivalent to delete_file; the safety semantics mean it is not removed immediately). After execution the file enters the pending-delete list.",
+    "fields": [
+      {
+        "key": "filename",
+        "type": "string",
+        "required": true,
+        "example": "old_file.txt"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "delete_file",
+    "description": "Delete a file inside the sandbox. Shares implementation with mark_delete.",
+    "fields": [
+      {
+        "key": "filename",
+        "type": "string",
+        "required": true,
+        "example": "old_file.txt"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "list_files",
+    "description": "List all files under the current project working directory (recursively). no parameters.",
+    "fields": [],
+    "returns": "(ok, message). message is an indented file list."
+  },
+  {
+    "name": "backup_workspace",
+    "description": "Create a timestamped backup of the whole workspace (as an archive). Optionally pass a label to distinguish backups.",
+    "fields": [
+      {
+        "key": "label",
+        "type": "string",
+        "required": false,
+        "example": "before_refactor"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "update_ds_section",
+    "description": "Update a section in DS.md (the project documentation file). Supports description / pending / completed / custom.",
+    "fields": [
+      {
+        "key": "section",
+        "type": "string",
+        "required": true,
+        "example": "description"
+      },
+      {
+        "key": "content",
+        "type": "string",
+        "required": true,
+        "example": "重构登录模块，提高可维护性"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "add_task",
+    "description": "Append a task to the pending task list.",
+    "fields": [
+      {
+        "key": "task",
+        "type": "string",
+        "required": true,
+        "example": "为 login 模块添加单元测试"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "complete_task",
+    "description": "Move a task from the pending list to the completed list.",
+    "fields": [
+      {
+        "key": "task",
+        "type": "string",
+        "required": true,
+        "example": "为 login 模块添加单元测试"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "web_search",
+    "description": "Issue a keyword query to an external search engine; returns a list of titles / snippets / URLs. Must not be used to query sensitive data.",
+    "fields": [
+      {
+        "key": "query",
+        "type": "string",
+        "required": true,
+        "example": "Python typing Protocol examples"
+      }
+    ],
+    "returns": "(ok, message). message is formatted search results."
+  },
+  {
+    "name": "web_fetch",
+    "description": "Fetch the HTML/text contents of a public URL (read with SSR protection), used to retrieve public documentation. Private addresses are rejected.",
+    "fields": [
+      {
+        "key": "url",
+        "type": "string",
+        "required": true,
+        "example": "https://docs.python.org/3/library/typing.html"
+      },
+      {
+        "key": "allow_private",
+        "type": "boolean",
+        "required": false,
+        "example": false,
+        "note": "default False; even when True the SSR protection policy will be checked"
+      }
+    ],
+    "returns": "(ok, message). message is the sanitized HTML text (size-limited)."
+  },
+  {
+    "name": "http_request",
+    "description": "Make an HTTP/HTTPS request; returns status code, headers, and response body (with a max bytes cap). Used to test self-built APIs.",
+    "fields": [
+      {
+        "key": "url",
+        "type": "string",
+        "required": true,
+        "example": "https://api.example.com/ping"
+      },
+      {
+        "key": "method",
+        "type": "string",
+        "required": false,
+        "example": "GET",
+        "note": "GET/POST/PUT/DELETE/PATCH"
+      },
+      {
+        "key": "headers",
+        "type": "object",
+        "required": false,
+        "example": {
+          "Content-Type": "application/json"
+        }
+      },
+      {
+        "key": "body",
+        "type": "string",
+        "required": false,
+        "example": "{\"name\":\"test\"}"
+      },
+      {
+        "key": "timeout",
+        "type": "number",
+        "required": false,
+        "example": 30,
+        "note": "in seconds"
+      },
+      {
+        "key": "follow_redirects",
+        "type": "boolean",
+        "required": false,
+        "example": true
+      },
+      {
+        "key": "verify_ssl",
+        "type": "boolean",
+        "required": false,
+        "example": true
+      },
+      {
+        "key": "allow_private",
+        "type": "boolean",
+        "required": false,
+        "example": false
+      },
+      {
+        "key": "max_bytes",
+        "type": "number",
+        "required": false,
+        "example": 1048576
+      }
+    ],
+    "returns": "(ok, message). message summarizes status/headers/body/error."
+  },
+  {
+    "name": "docs_lookup",
+    "description": "Search official documentation of common programming languages by keyword; returns a small number of relevant paragraphs.",
+    "fields": [
+      {
+        "key": "query",
+        "type": "string",
+        "required": true,
+        "example": "python dataclass"
+      },
+      {
+        "key": "language",
+        "type": "string",
+        "required": false,
+        "example": "en"
+      },
+      {
+        "key": "max_lines",
+        "type": "number",
+        "required": false,
+        "example": 300
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "run_command",
+    "description": "Execute a synchronous command inside the sandbox (blocks until finished). Restricted by a dangerous-command blocklist (e.g. rm -rf /, sudo, chmod 777, etc.).",
+    "fields": [
+      {
+        "key": "command",
+        "type": "string",
+        "required": true,
+        "example": "python -m pytest tests/ -x"
+      },
+      {
+        "key": "timeout",
+        "type": "number",
+        "required": false,
+        "example": 120,
+        "note": "in seconds"
+      }
+    ],
+    "returns": "(ok, message). message is the merged stdout+stderr (size-limited)."
+  },
+  {
+    "name": "run_command_stream",
+    "description": "Streaming version of run_command, allowing the on_output_line callback to consume output line by line.",
+    "fields": [
+      {
+        "key": "command",
+        "type": "string",
+        "required": true,
+        "example": "npm run build"
+      },
+      {
+        "key": "timeout",
+        "type": "number",
+        "required": false,
+        "example": 300
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "calculator",
+    "description": "Safe expression calculator (no eval/exec; AST-based whitelist evaluation). Supports +-*/ and parentheses.",
+    "fields": [
+      {
+        "key": "expression",
+        "type": "string",
+        "required": true,
+        "example": "(3.14 * 2) + 5"
+      }
+    ],
+    "returns": "(ok, message). message is the computed result string."
+  },
+  {
+    "name": "execute_custom",
+    "description": "Run a user-defined script (shell/python/nodejs). Requires external authorization; protected by the command blocklist.",
+    "fields": [
+      {
+        "key": "type",
+        "type": "string",
+        "required": true,
+        "example": "shell",
+        "note": "may be shell / python / nodejs"
+      },
+      {
+        "key": "command",
+        "type": "string",
+        "required": false,
+        "example": "echo hello"
+      },
+      {
+        "key": "code",
+        "type": "string",
+        "required": false,
+        "example": "print('hi')"
+      },
+      {
+        "key": "timeout",
+        "type": "number",
+        "required": false,
+        "example": 60
+      },
+      {
+        "key": "server_name",
+        "type": "string",
+        "required": false,
+        "example": "mcp_fs"
+      },
+      {
+        "key": "tool",
+        "type": "string",
+        "required": false,
+        "example": "read_file"
+      },
+      {
+        "key": "args",
+        "type": "object",
+        "required": false,
+        "example": {
+          "path": "README.md"
+        }
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "mcp_call",
+    "description": "Invoke a registered MCP (Model Context Protocol) tool. Available tools are provided by the external manager.",
+    "fields": [
+      {
+        "key": "server_name",
+        "type": "string",
+        "required": true,
+        "example": "filesystem"
+      },
+      {
+        "key": "tool_name",
+        "type": "string",
+        "required": true,
+        "example": "read_file"
+      },
+      {
+        "key": "args",
+        "type": "object",
+        "required": true,
+        "example": {
+          "path": "README.md"
+        }
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "mcp_list",
+    "description": "List all configured MCP servers, their enabled/running status and available tool count.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "mcp_add",
+    "description": "Add or update an MCP server configuration. You may use this to register a new MCP server by yourself.",
+    "fields": [
+      {
+        "key": "name",
+        "type": "string",
+        "required": true,
+        "example": "filesystem"
+      },
+      {
+        "key": "display_name",
+        "type": "string",
+        "required": false,
+        "example": "Filesystem MCP"
+      },
+      {
+        "key": "description",
+        "type": "string",
+        "required": false,
+        "example": "Access files via MCP"
+      },
+      {
+        "key": "command",
+        "type": "string",
+        "required": false,
+        "example": "npx",
+        "note": "default npx"
+      },
+      {
+        "key": "args",
+        "type": "array<string>",
+        "required": false,
+        "example": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "/tmp"
+        ]
+      },
+      {
+        "key": "env",
+        "type": "object",
+        "required": false,
+        "example": {}
+      },
+      {
+        "key": "working_dir",
+        "type": "string",
+        "required": false,
+        "example": "/workspace"
+      },
+      {
+        "key": "enabled",
+        "type": "boolean",
+        "required": false,
+        "example": false,
+        "note": "default false; use mcp_start to run"
+      },
+      {
+        "key": "install_hint",
+        "type": "string",
+        "required": false,
+        "example": "npm install -g @modelcontextprotocol/server-filesystem"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "mcp_remove",
+    "description": "Remove an MCP server configuration by name.",
+    "fields": [
+      {
+        "key": "name",
+        "type": "string",
+        "required": true,
+        "example": "filesystem"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "mcp_enable",
+    "description": "Enable or disable an MCP server configuration (persists config, does not start/stop process).",
+    "fields": [
+      {
+        "key": "name",
+        "type": "string",
+        "required": true,
+        "example": "filesystem"
+      },
+      {
+        "key": "enabled",
+        "type": "boolean",
+        "required": false,
+        "example": true,
+        "note": "default true"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "mcp_start",
+    "description": "Start an MCP server process and register its tools. Requires the server to be added and enabled first.",
+    "fields": [
+      {
+        "key": "name",
+        "type": "string",
+        "required": true,
+        "example": "filesystem"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "mcp_stop",
+    "description": "Stop a running MCP server process and unregister its tools.",
+    "fields": [
+      {
+        "key": "name",
+        "type": "string",
+        "required": true,
+        "example": "filesystem"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "exit_conversation",
+    "description": "Proactively signal 'end this turn' to the outside; the model may attach a reason. Does not terminate the process.",
+    "fields": [
+      {
+        "key": "reason",
+        "type": "string",
+        "required": false,
+        "example": "任务已完成"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "create_snapshot",
+    "description": "Create a snapshot (versioned backup) of the current working directory.",
+    "fields": [
+      {
+        "key": "name",
+        "type": "string",
+        "required": true,
+        "example": "before_refactor"
+      },
+      {
+        "key": "description",
+        "type": "string",
+        "required": false,
+        "example": "重构 login 之前的工作状态"
+      }
+    ],
+    "returns": "(ok, message). includes snapshot id."
+  },
+  {
+    "name": "restore_snapshot",
+    "description": "Roll the working directory back to a snapshot state; uncommitted local changes will be overwritten — please confirm first.",
+    "fields": [
+      {
+        "key": "snapshot_id",
+        "type": "string",
+        "required": true,
+        "example": "abc123...",
+        "note": "'id' or 'name' are aliases"
+      },
+      {
+        "key": "id",
+        "type": "string",
+        "required": false,
+        "example": "abc123..."
+      },
+      {
+        "key": "name",
+        "type": "string",
+        "required": false,
+        "example": "before_refactor"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "list_snapshots",
+    "description": "List all snapshots already created under this project. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "undo_last",
+    "description": "Undo the most recent file change or roll back N steps.",
+    "fields": [
+      {
+        "key": "n",
+        "type": "number",
+        "required": false,
+        "example": 1,
+        "note": "default 1"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "delegate_subagent",
+    "description": "Delegate a task description to a sub-agent; the sub-agent has its own tool-call loop and returns aggregated results when finished.",
+    "fields": [
+      {
+        "key": "task",
+        "type": "string",
+        "required": true,
+        "example": "为 src/login.py 生成单元测试，覆盖率 >= 80%，并在 tests/ 中生成对应文件。"
+      },
+      {
+        "key": "timeout",
+        "type": "number",
+        "required": false,
+        "example": 300
+      }
+    ],
+    "returns": "(ok, message). message is the sub-agent's final report."
+  },
+  {
+    "name": "start_subagent",
+    "description": "Start a background sub-agent (asynchronous). Results can later be polled via get_subagent_results.",
+    "fields": [
+      {
+        "key": "task",
+        "type": "string",
+        "required": true,
+        "example": "扫描整个项目的 TODO/FIXME 并做汇总。"
+      },
+      {
+        "key": "name",
+        "type": "string",
+        "required": false,
+        "example": "todo_scanner"
+      }
+    ],
+    "returns": "(ok, message). includes sub-agent id."
+  },
+  {
+    "name": "list_subagents",
+    "description": "List currently running / completed sub-agents. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "get_subagent_results",
+    "description": "Retrieve the latest output from a sub-agent (including status and text result).",
+    "fields": [
+      {
+        "key": "id",
+        "type": "string",
+        "required": true,
+        "example": "sa_abc123"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "stop_subagent",
+    "description": "Send a stop signal to a sub-agent, asking it to exit before the next tool-call point.",
+    "fields": [
+      {
+        "key": "id",
+        "type": "string",
+        "required": true,
+        "example": "sa_abc123"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "ask_user_questions",
+    "description": "Pop up a GUI asking the user one or more questions and wait for a reply; used to clarify requirements.",
+    "fields": [
+      {
+        "key": "questions",
+        "type": "array<string>",
+        "required": true,
+        "example": [
+          "这个配置应该放在哪个环境？",
+          "默认值使用 8080 可以吗？"
+        ]
+      }
+    ],
+    "returns": "(ok, message). message is a JSON-array string of the user's ordered answers."
+  },
+  {
+    "name": "search_code",
+    "description": "Search code lines inside the sandbox by keyword / regex; filterable by extension, and returns context lines.",
+    "fields": [
+      {
+        "key": "pattern",
+        "type": "string",
+        "required": true,
+        "example": "def login"
+      },
+      {
+        "key": "extension",
+        "type": "string",
+        "required": false,
+        "example": ".py",
+        "note": "empty = all extensions"
+      },
+      {
+        "key": "context",
+        "type": "number",
+        "required": false,
+        "example": 2,
+        "note": "number of surrounding context lines to show"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "find_symbol",
+    "description": "Search for a definition by symbol name (function/class/variable). Not AST-parsed; based on literal matching — useful for rough positioning.",
+    "fields": [
+      {
+        "key": "symbol",
+        "type": "string",
+        "required": true,
+        "example": "LoginService"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "find_files",
+    "description": "List matching project files by glob pattern (shell wildcards).",
+    "fields": [
+      {
+        "key": "glob",
+        "type": "string",
+        "required": true,
+        "example": "**/*.py",
+        "note": "* and ** wildcards supported"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "find_todo",
+    "description": "Search for all lines in the project containing TODO. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "find_fixme",
+    "description": "Search for all lines in the project containing FIXME. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "edit_file",
+    "description": "Perform a precise 'old text -> new text' replacement inside a file. The old text must match exactly.",
+    "fields": [
+      {
+        "key": "filename",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py"
+      },
+      {
+        "key": "old_text",
+        "type": "string",
+        "required": true,
+        "example": "def hello():\n    return 'hi'"
+      },
+      {
+        "key": "new_text",
+        "type": "string",
+        "required": true,
+        "example": "def hello(name: str = 'world') -> str:\n    return f'hi {name}'"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "insert_lines",
+    "description": "Insert multiple lines of text after a specified line number.",
+    "fields": [
+      {
+        "key": "filename",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py"
+      },
+      {
+        "key": "after_line",
+        "type": "number",
+        "required": true,
+        "example": 42
+      },
+      {
+        "key": "content",
+        "type": "string",
+        "required": true,
+        "example": "print('debug point')"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "delete_lines",
+    "description": "Delete a contiguous range of lines in a file (from_line to to_line, both endpoints inclusive).",
+    "fields": [
+      {
+        "key": "filename",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py"
+      },
+      {
+        "key": "from_line",
+        "type": "number",
+        "required": true,
+        "example": 10
+      },
+      {
+        "key": "to_line",
+        "type": "number",
+        "required": true,
+        "example": 15
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "replace_in_files",
+    "description": "Perform a global find -> replace by literal text across all files matching the extension. Case-sensitive.",
+    "fields": [
+      {
+        "key": "find",
+        "type": "string",
+        "required": true,
+        "example": "old_function_name"
+      },
+      {
+        "key": "replace",
+        "type": "string",
+        "required": true,
+        "example": "new_function_name"
+      },
+      {
+        "key": "file_mask",
+        "type": "string",
+        "required": false,
+        "example": "*.py"
+      }
+    ],
+    "returns": "(ok, message). includes list of affected files."
+  },
+  {
+    "name": "rename_symbol",
+    "description": "Rename by symbol name (cross-file lookup); based on literal replacement, not semantic renaming.",
+    "fields": [
+      {
+        "key": "old_name",
+        "type": "string",
+        "required": true,
+        "example": "UserService"
+      },
+      {
+        "key": "new_name",
+        "type": "string",
+        "required": true,
+        "example": "AccountService"
+      }
+    ],
+    "returns": "(ok, message). includes list of affected files."
+  },
+  {
+    "name": "analyze_file",
+    "description": "Analyze a single file's byte count, line count, and non-empty lines, and return a condensed view of the file contents.",
+    "fields": [
+      {
+        "key": "file",
+        "type": "string",
+        "required": false,
+        "example": "src/app.py",
+        "note": "'path' is an alias"
+      },
+      {
+        "key": "path",
+        "type": "string",
+        "required": false,
+        "example": "src/app.py"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "find_imports",
+    "description": "Extract the list of import / from ... import statements in a file.",
+    "fields": [
+      {
+        "key": "path",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py"
+      }
+    ],
+    "returns": "(ok, message). one import per line."
+  },
+  {
+    "name": "show_call_chain",
+    "description": "Starting from an entry symbol, display the call chain (currently an approximate chain based on literal matching).",
+    "fields": [
+      {
+        "key": "symbol",
+        "type": "string",
+        "required": true,
+        "example": "login"
+      },
+      {
+        "key": "depth",
+        "type": "number",
+        "required": false,
+        "example": 3
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "code_metrics",
+    "description": "Return code-wide metrics (file count, line count, extension statistics, etc.). no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "show_dependencies",
+    "description": "Display an overview of third-party modules imported by the project. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "run_tests",
+    "description": "Run the project's test scripts (e.g. pytest, npm test, etc.). Scope (subdirectory) and pattern (match test files) can be specified.",
+    "fields": [
+      {
+        "key": "scope",
+        "type": "string",
+        "required": false,
+        "example": "tests/"
+      },
+      {
+        "key": "pattern",
+        "type": "string",
+        "required": false,
+        "example": "test_*.py"
+      }
+    ],
+    "returns": "(ok, message). message is the test execution output."
+  },
+  {
+    "name": "lint_code",
+    "description": "Run lint on a list of specified files (default pyflakes).",
+    "fields": [
+      {
+        "key": "filenames",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py src/utils.py"
+      },
+      {
+        "key": "engine",
+        "type": "string",
+        "required": false,
+        "example": "pyflakes"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "check_types",
+    "description": "Run type checking on specified Python files (based on mypy).",
+    "fields": [
+      {
+        "key": "filenames",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "format_code",
+    "description": "Run automatic formatting on specified Python files (based on black/similar tools).",
+    "fields": [
+      {
+        "key": "filenames",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py src/utils.py"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "project_brief",
+    "description": "Generate a short summary of the whole project: file count, line count, dominant languages, and directory structure. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "file_intel",
+    "description": "Generate an 'intelligence' summary for a single file: list of functions/classes, import dependencies, quick code-style scan.",
+    "fields": [
+      {
+        "key": "path",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "find_related",
+    "description": "Find other files related to the specified file / symbol (based on import / naming similarity).",
+    "fields": [
+      {
+        "key": "path",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py"
+      },
+      {
+        "key": "symbol",
+        "type": "string",
+        "required": false,
+        "example": "login"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "analyze_symbol",
+    "description": "Deep analysis around a symbol: definition position, call sites, typical parameters / returns.",
+    "fields": [
+      {
+        "key": "symbol",
+        "type": "string",
+        "required": true,
+        "example": "UserService.login"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "impact_analysis",
+    "description": "Change-impact analysis for a target file: which other modules would be affected by changes to this file.",
+    "fields": [
+      {
+        "key": "path",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "all_symbols",
+    "description": "List all symbols (classes/functions) across the whole project (roughly, based on literal matching). no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "complexity_report",
+    "description": "Roughly estimate line-based complexity per file and output a ranking. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "risk_files",
+    "description": "Return a list of 'risk files': files with high line count / high TODO/FIXME density / recently frequently modified. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "codebase_search",
+    "description": "Semantic search across the codebase using a lightweight TF-IDF vector index. Use this when keyword search is not enough and you need to find relevant code snippets by natural language description.",
+    "fields": [
+      {
+        "key": "query",
+        "type": "string",
+        "required": true,
+        "example": "where is the user authentication logic",
+        "note": "natural language query or keywords"
+      },
+      {
+        "key": "top_k",
+        "type": "number",
+        "required": false,
+        "example": 8,
+        "note": "number of results to return (1-20, default 8)"
+      },
+      {
+        "key": "force_reindex",
+        "type": "boolean",
+        "required": false,
+        "example": false,
+        "note": "force rebuild the vector index"
+      }
+    ],
+    "returns": "(ok, message). includes file paths, line ranges, similarity scores and snippets."
+  },
+  {
+    "name": "validate_all",
+    "description": "Run a quick syntax / structural validation pass on all analyzable files in the project.",
+    "fields": [
+      {
+        "key": "files",
+        "type": "string",
+        "required": false,
+        "example": "src/app.py src/utils.py",
+        "note": "empty = validate all supported files"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "validate_file",
+    "description": "Run structural validation on a single file (Python: AST compilation; JSON/XML/YAML: parsing).",
+    "fields": [
+      {
+        "key": "filename",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py",
+        "note": "'path' is an alias"
+      },
+      {
+        "key": "path",
+        "type": "string",
+        "required": false,
+        "example": "src/app.py"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "quick_syntax_check",
+    "description": "Perform a lightweight syntax check on a small set of files (lighter than validate_file).",
+    "fields": [
+      {
+        "key": "files",
+        "type": "string",
+        "required": true,
+        "example": "src/app.py src/utils.py"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "create_plan",
+    "description": "Break a goal description into a multi-step execution plan.",
+    "fields": [
+      {
+        "key": "goal",
+        "type": "string",
+        "required": true,
+        "example": "重构 login 模块，使其支持模块化 session 管理并 >= 80% 单元测试覆盖率",
+        "note": "'task' is an alias"
+      },
+      {
+        "key": "task",
+        "type": "string",
+        "required": false,
+        "example": "同上"
+      }
+    ],
+    "returns": "(ok, message). message is the structured description of the plan."
+  },
+  {
+    "name": "revise_plan",
+    "description": "Re-generate the existing plan based on a new reason or a new step list.",
+    "fields": [
+      {
+        "key": "reason",
+        "type": "string",
+        "required": false,
+        "example": "用户要求改用 redis 作为 session 后端",
+        "note": "'note' is an alias"
+      },
+      {
+        "key": "note",
+        "type": "string",
+        "required": false,
+        "example": "同上"
+      },
+      {
+        "key": "new_steps",
+        "type": "string",
+        "required": false,
+        "example": "1. 增加 redis 依赖\n2. 实现 RedisSessionStore"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "show_plan",
+    "description": "Display the current multi-agent execution plan (including progress percentage). no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "run_agents",
+    "description": "Start multi-agent parallel execution based on the existing plan; mode (full/dry/step) can be specified.",
+    "fields": [
+      {
+        "key": "goal",
+        "type": "string",
+        "required": false,
+        "example": "执行 plan"
+      },
+      {
+        "key": "mode",
+        "type": "string",
+        "required": false,
+        "example": "full",
+        "note": "full / dry / step"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "agent_progress",
+    "description": "Display the current overall progress of multi-agent execution (completed steps / total steps). no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "mark_step_done",
+    "description": "Mark the Nth step in the plan as complete.",
+    "fields": [
+      {
+        "key": "step_index",
+        "type": "number",
+        "required": true,
+        "example": 2,
+        "note": "starts at 1; 'idx' is an alias"
+      },
+      {
+        "key": "idx",
+        "type": "number",
+        "required": false,
+        "example": 2
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "sklii_call",
+    "description": "Invoke a registered sklii tool.",
+    "fields": [
+      {
+        "key": "name",
+        "type": "string",
+        "required": true,
+        "example": "schema.validate"
+      },
+      {
+        "key": "args",
+        "type": "object",
+        "required": false,
+        "example": {
+          "input": "{...}"
+        }
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "sklii_create",
+    "description": "Create and register a new custom skill/tool in the current project's sklii toolkit. You are allowed to create skills by yourself when the user asks or when it improves the workflow. Currently supports 'http' and 'mcp' type skills (no local python/shell runners).",
+    "fields": [
+      {
+        "key": "name",
+        "type": "string",
+        "required": true,
+        "example": "schema.validate"
+      },
+      {
+        "key": "display_name",
+        "type": "string",
+        "required": false,
+        "example": "Schema Validator"
+      },
+      {
+        "key": "description",
+        "type": "string",
+        "required": false,
+        "example": "校验 JSON schema 是否匹配当前数据结构"
+      },
+      {
+        "key": "author",
+        "type": "string",
+        "required": false,
+        "example": "AI"
+      },
+      {
+        "key": "tools",
+        "type": "array<object>",
+        "required": false,
+        "example": [
+          {
+            "name": "validate",
+            "description": "Validate JSON schema",
+            "type": "http",
+            "method": "POST",
+            "url": "https://api.example.com/validate",
+            "args": {
+              "schema": "object",
+              "data": "object"
+            }
+          }
+        ],
+        "note": "each item must contain at least 'name' and 'run' or 'type' to be callable"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "sklii_list",
+    "description": "List all sklii tools registered by the current project. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "git_status",
+    "description": "Run git status --short; returns a summary of current workspace changes. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "git_diff",
+    "description": "Run git diff; optionally pass --cached or a single file path.",
+    "fields": [
+      {
+        "key": "cached",
+        "type": "string",
+        "required": false,
+        "example": "true",
+        "note": "1/true/yes are treated as true"
+      },
+      {
+        "key": "file",
+        "type": "string",
+        "required": false,
+        "example": "src/app.py",
+        "note": "'filename' or 'path' are aliases"
+      },
+      {
+        "key": "filename",
+        "type": "string",
+        "required": false,
+        "example": "src/app.py"
+      },
+      {
+        "key": "path",
+        "type": "string",
+        "required": false,
+        "example": "src/app.py"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "git_commit",
+    "description": "Run git add . && git commit -m <message>. A non-empty message is required.",
+    "fields": [
+      {
+        "key": "message",
+        "type": "string",
+        "required": true,
+        "example": "refactor(login): 模块化 session 管理"
+      }
+    ],
+    "returns": "(ok, message). ok reflects the git commit exit code."
+  },
+  {
+    "name": "git_branch",
+    "description": "List local branches and their latest commit summary. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "git_log",
+    "description": "Display the latest n commits (oneline).",
+    "fields": [
+      {
+        "key": "n",
+        "type": "number",
+        "required": false,
+        "example": 10,
+        "note": "default 10, max 500"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "git_checkout",
+    "description": "Switch branch (git checkout <branch>). The 'branch' field only allows letters, digits, /, ., _, and -.",
+    "fields": [
+      {
+        "key": "branch",
+        "type": "string",
+        "required": true,
+        "example": "feature/session-redis",
+        "note": "'name' is an alias"
+      },
+      {
+        "key": "name",
+        "type": "string",
+        "required": false,
+        "example": "feature/session-redis"
+      }
+    ],
+    "returns": "(ok, message). ok reflects the git checkout exit code."
+  },
+  {
+    "name": "view_image",
+    "description": "View an image's metadata (dimensions, format); no OCR is performed.",
+    "fields": [
+      {
+        "key": "path",
+        "type": "string",
+        "required": true,
+        "example": "assets/screenshot.png",
+        "note": "'file' is an alias"
+      },
+      {
+        "key": "file",
+        "type": "string",
+        "required": false,
+        "example": "assets/screenshot.png"
+      }
+    ],
+    "returns": "(ok, message). message contains format / size / mode."
+  },
+  {
+    "name": "list_uploaded_images",
+    "description": "List all images uploaded during this session along with their metadata. no parameters.",
+    "fields": [],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "parse_document_text",
+    "description": "Parse the plain text contents of a document (PDF/DOCX/TXT etc.).",
+    "fields": [
+      {
+        "key": "path",
+        "type": "string",
+        "required": true,
+        "example": "docs/spec.pdf"
+      },
+      {
+        "key": "file",
+        "type": "string",
+        "required": false,
+        "example": "docs/spec.pdf"
+      }
+    ],
+    "returns": "(ok, message). message is the document's plain text (size-limited)."
+  },
+  {
+    "name": "parse_document_images",
+    "description": "Extract all images from a document (no OCR; returns image count and brief info).",
+    "fields": [
+      {
+        "key": "path",
+        "type": "string",
+        "required": true,
+        "example": "docs/spec.pdf"
+      },
+      {
+        "key": "file",
+        "type": "string",
+        "required": false,
+        "example": "docs/spec.pdf"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "parse_document",
+    "description": "Combined parsing: returns the document's plain text + metadata such as image count.",
+    "fields": [
+      {
+        "key": "path",
+        "type": "string",
+        "required": true,
+        "example": "docs/spec.pdf"
+      },
+      {
+        "key": "file",
+        "type": "string",
+        "required": false,
+        "example": "docs/spec.pdf"
+      }
+    ],
+    "returns": "(ok, message)."
+  },
+  {
+    "name": "record_lesson",
+    "description": "Store one lesson per file with a one-line summary. Record corrections and confirmed approaches, including why they mattered. Update existing notes rather than creating duplicates.",
+    "fields": [
+      {
+        "key": "title",
+        "type": "string",
+        "required": true,
+        "example": "Fix: auth middleware must check token expiry before DB lookup",
+        "note": "one-line summary used as the filename"
+      },
+      {
+        "key": "content",
+        "type": "string",
+        "required": true,
+        "example": "When the auth middleware runs, always check JWT expiry first. If it's expired, return 401 without hitting the DB. This prevents unnecessary DB load and avoids stale-user errors."
+      },
+      {
+        "key": "tags",
+        "type": "string",
+        "required": false,
+        "example": "auth,security,performance",
+        "note": "comma-separated tags for filtering"
+      }
+    ],
+    "returns": "(ok, message). Creates or updates a lesson file in .dscode/lessons/."
+  },
+  {
+    "name": "list_lessons",
+    "description": "List all stored lessons/notes. Optionally filter by tag or search keyword.",
+    "fields": [
+      {
+        "key": "tag",
+        "type": "string",
+        "required": false,
+        "example": "security",
+        "note": "filter lessons by tag"
+      },
+      {
+        "key": "search",
+        "type": "string",
+        "required": false,
+        "example": "auth",
+        "note": "search in lesson titles and content"
+      }
+    ],
+    "returns": "(ok, message). message is a formatted list of lesson titles and summaries."
+  },
+  {
+    "name": "delete_lesson",
+    "description": "Delete a lesson by its title. Use this when a saved note turns out to be wrong or no longer relevant.",
+    "fields": [
+      {
+        "key": "title",
+        "type": "string",
+        "required": true,
+        "example": "Fix: auth middleware must check token expiry before DB lookup",
+        "note": "exact title of the lesson to delete"
+      }
+    ],
+    "returns": "(ok, message). Deletes the lesson file from .dscode/lessons/."
+  },
+  {
+    "name": "set_conversation_title",
+    "description": "Set the visible title of the current conversation once you understand what the user is building. If the user has already manually renamed the conversation, this tool will be rejected. Call it sparingly (usually after the first meaningful user request).",
+    "fields": [
+      {
+        "key": "title",
+        "type": "string",
+        "required": true,
+        "example": "Todo CLI in Python",
+        "note": "short, human-readable conversation title (<= 128 chars)"
+      }
+    ],
+    "returns": "(ok, message). Updates the conversation display name in the sidebar."
+  }
+]
