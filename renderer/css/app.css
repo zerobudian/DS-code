@@ -342,3 +342,26 @@
 }
 .code-block { background: var(--code-bg); padding: 10px 14px; border-radius: 6px; font-family: var(--font-code); font-size: 12px; line-height: 1.5; overflow-x: auto; margin: 6px 0; white-space: pre; }
 .inline-code { background: var(--code-bg); padding: 1px 4px; border-radius: 3px; font-family: var(--font-code); font-size: 12px; color: var(--accent); }
+/* Engine confirmations and text entry dialogs. */
+.dialog-overlay { position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,.35); display:grid; place-items:center; }
+.dialog-panel { background:var(--card); color:var(--text-2); padding:24px; border-radius:16px; width:min(560px,85vw); max-height:80vh; overflow:auto; }
+.dialog-panel pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; }
+.dialog-panel label { display:block; margin:12px 0; }
+.dialog-panel textarea { display:block; width:100%; min-height:64px; margin-top:8px; }
+.dialog-buttons { display:flex; justify-content:flex-end; gap:12px; margin-top:20px; }
+.dialog-buttons button { padding:8px 18px; cursor:pointer; }
+
+#attachment-list { display:flex; flex-wrap:wrap; gap:4px; max-width:35%; }
+#attachment-list:empty { display:none; }
+#attachment-list button,.project-file { border:1px solid var(--border); border-radius:6px; padding:5px 8px; background:var(--surface); color:var(--text); font-size:12px; cursor:pointer; }
+.project-file { display:block; width:100%; text-align:left; margin-bottom:5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dialog-panel textarea[readonly] { min-height:240px; font-family:monospace; }
+
+.tool-dot.failed { background:#d14343; }
+.tool-dot.finished { background:var(--text-3); }
+
+.ds-advanced { font-size:12px; margin-top:12px; color:var(--text); }
+.ds-advanced label { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:8px 0; }
+.ds-advanced input,.ds-advanced select { max-width:160px; }
+.provider-row { display:flex; gap:6px; align-items:center; margin:8px 0; font-size:12px; }
+.provider-row span { flex:1; overflow:hidden; text-overflow:ellipsis; }

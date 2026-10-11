@@ -1,0 +1,22 @@
+# Optional MCP, image and legacy Qt runtime verified by the audit.
+-r requirements.lock
+attrs==26.1.0
+click==8.5.0
+httpx-sse==0.4.3
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+mcp==1.26.0
+pillow==12.1.0
+pydantic-settings==2.15.0
+PyJWT==2.15.1
+PySide6==6.10.2
+PySide6_Addons==6.10.2
+PySide6_Essentials==6.10.2
+python-dotenv==1.2.4
+python-multipart==0.0.32
+referencing==0.37.0
+rpds-py==2026.9.1
+shiboken6==6.10.2
+sse-starlette==3.5.0
+starlette==1.7.0
+uvicorn==0.54.0

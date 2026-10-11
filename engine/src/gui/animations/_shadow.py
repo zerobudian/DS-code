@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPropertyAnimation
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QWidget, QGraphicsDropShadowEffect
+from PySide6.QtWidgets import QWidget, QGraphicsDropShadowEffect, QGraphicsBlurEffect
 
 from src.gui.style import COLORS
 from src.gui.animations._constants import EASE_SPRING, DURATION_PANEL

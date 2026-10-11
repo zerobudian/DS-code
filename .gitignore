@@ -1,0 +1,14 @@
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+data/*
+!data/projects/
+!data/projects/.gitkeep
+dscode_data/
+.DS_Store
+test-results/
+.coverage
+coverage.xml
+.coverage.*

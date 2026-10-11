@@ -8,7 +8,7 @@ from PySide6.QtCore import (
     Qt, Signal, QSize,
 )
 from PySide6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy,
+    QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy, QPushButton, QWidget,
 )
 
 from src.gui.style import RADII, COLORS, FONT_STACK, FONT_CODE, FONT_WEIGHTS, SIZES, tr

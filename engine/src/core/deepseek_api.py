@@ -15,8 +15,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 import json
+import os
 import re
 import socket
+import ssl
 import threading
 import time
 from contextlib import contextmanager
@@ -106,6 +108,8 @@ class DeepSeekAPI:
 
         当 certifi 不可用时显式记录 warning，而不是静默 fallback 到系统默认 CA（M-004）。
         """
+        if os.environ.get("SSL_CERT_FILE"):
+            return os.environ["SSL_CERT_FILE"]
         if certifi is not None:
             return certifi.where()
         logger.warning(
@@ -135,13 +139,17 @@ class DeepSeekAPI:
                 self._http_session = None
             if httpx is None:
                 return None
-            timeout = self._make_httpx_timeout()
-            self._http_session = httpx.Client(
-                verify=self._get_ssl_verify(),
-                timeout=timeout,
-            )
+            self._http_session = self._make_http_client()
             self._http_session_key = key
             return self._http_session
+
+    def _make_http_client(self):
+        if httpx is None:
+            return None
+        verify = self._get_ssl_verify()
+        if isinstance(verify, str):
+            verify = ssl.create_default_context(cafile=verify)
+        return httpx.Client(verify=verify, timeout=self._make_httpx_timeout())
 
     def _get_client(self) -> Optional["OpenAI"]:
         _ensure_openai()
@@ -157,11 +165,13 @@ class DeepSeekAPI:
             # 使用 httpx.Timeout 设置连接/读取超时，避免弱网/服务端无响应时永久阻塞
             timeout = self._make_httpx_timeout()
             # 显式传入 http_client 并强制开启 SSL 证书验证（CWE-295 / MEDIUM-001）
-            http_client = self._get_http_session()
+            # Each OpenAI client owns its transport. Closing an old client must
+            # never close the diagnostics session or its replacement client.
+            http_client = self._make_http_client()
             old_client = self._client
             self._client = OpenAI(
                 api_key=key, base_url=base_url,
-                timeout=timeout,
+                timeout=timeout, max_retries=0,
                 http_client=http_client,
             )
             self._client_key = key
@@ -301,9 +311,7 @@ class DeepSeekAPI:
                             data = resp.json()
                         except (ValueError, json.JSONDecodeError):
                             return {"available_balance": 0, "ok": False, "error": "bad_json"}
-                        avail = float(data.get("available_balance", 0) or 0)
-                        total = float(data.get("total_balance", 0) or 0)
-                        return {"available_balance": avail, "total_balance": total, "ok": True}
+                        return self._normalize_balance(data)
                     return {
                         "available_balance": 0, "ok": False,
                         "code": resp.status_code,
@@ -334,9 +342,7 @@ class DeepSeekAPI:
                     data = resp.json()
                 except (ValueError, json.JSONDecodeError):
                     return {"available_balance": 0, "ok": False, "error": "bad_json"}
-                avail = float(data.get("available_balance", 0) or 0)
-                total = float(data.get("total_balance", 0) or 0)
-                return {"available_balance": avail, "total_balance": total, "ok": True}
+                return self._normalize_balance(data)
             return {
                 "available_balance": 0, "ok": False,
                 "code": resp.status_code,
@@ -350,6 +356,39 @@ class DeepSeekAPI:
                     resp.close()
                 except Exception as _exc:
                     logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
+
+    @staticmethod
+    def _normalize_balance(data: Dict) -> Dict:
+        infos = data.get("balance_infos", [])
+        if infos:
+            selected = next((i for i in infos if i.get("currency") == "CNY"), infos[0])
+            total = float(selected.get("total_balance", 0) or 0)
+            return {"available_balance": total, "total_balance": total, "ok": True,
+                    "currency": selected.get("currency", ""), "balance_infos": infos,
+                    "is_available": bool(data.get("is_available", False))}
+        return {"available_balance": float(data.get("available_balance", 0) or 0),
+                "total_balance": float(data.get("total_balance", 0) or 0), "ok": True,
+                "currency": data.get("currency", "CNY")}
+
+    def list_models(self) -> Dict:
+        """Fetch models using the configured URL, port, path and TLS policy."""
+        if not self.cfg.api_key:
+            return {"ok": False, "models": [], "error": "未配置 API Key"}
+        try:
+            session = self._get_http_session()
+            if session is None:
+                return {"ok": False, "models": [], "error": "请安装 requirements.txt 中的依赖"}
+            resp = session.get(f"{self._base_url()}/models",
+                               headers={"Authorization": f"Bearer {self.cfg.api_key}"})
+            try:
+                resp.raise_for_status()
+                return {"ok": True, "models": [
+                    {"id": m["id"], "name": m["id"], "label": m["id"]}
+                    for m in resp.json().get("data", []) if m.get("id")]}
+            finally:
+                resp.close()
+        except Exception as exc:
+            return {"ok": False, "models": [], "error": self._sanitize_error_message(str(exc))}
 
     def _balance_error_response(self, e) -> Dict:
         """统一余额查询异常返回格式（detail 经过脱敏，避免泄漏 API Key）。"""
@@ -487,6 +526,30 @@ class DeepSeekAPI:
         if last_exception is not None:
             raise last_exception
 
+    def _request_kwargs(self, model, messages, reasoning_effort, enable_thinking):
+        from urllib.parse import urlsplit
+        capabilities = self.cfg.get("provider_capabilities", {}) or {}
+        deepseek = urlsplit(self._base_url()).hostname == "api.deepseek.com" or model.startswith("deepseek-")
+        kwargs = dict(model=model, messages=messages, stream=True)
+        if capabilities.get("stream_usage", True):
+            kwargs["stream_options"] = {"include_usage": True}
+        if enable_thinking and capabilities.get("reasoning_effort", deepseek):
+            kwargs["reasoning_effort"] = reasoning_effort
+        if enable_thinking and capabilities.get("thinking", deepseek):
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        if capabilities.get("tools", True):
+            from src.core.prompts.tool_descriptions import TOOL_DESCRIPTIONS
+            kwargs["tools"] = self._to_openai_tools(TOOL_DESCRIPTIONS)
+        from src.core.context_budget import fit_context
+        try:
+            limit = int(self.cfg.get("context_tokens", 128000))
+            kwargs["messages"], removed = fit_context(messages, limit, kwargs.get("tools"))
+        except (ValueError, TypeError) as exc:
+            raise APIError(400, str(exc), need_retry=False) from exc
+        if removed:
+            logger.info("上下文预算省略 %s 条旧消息；磁盘历史保持完整", removed)
+        return kwargs
+
     def _chat_stream_once(self, client: "OpenAI", use_model: str, messages: List[Dict],
                           reasoning_effort: str,
                           on_text: Optional[Callable[[str], None]] = None,
@@ -495,43 +558,28 @@ class DeepSeekAPI:
                           enable_thinking: bool = True) -> Dict:
         """单次流式对话尝试（内部方法）。"""
         _ensure_openai()
-        full_content = ""
-        full_reasoning = ""
-        usage_summary = {}
-        stream = None  # 避免 finally 中 UnboundLocalError
-
-        # 取消状态容器 (闭包可用, 同时也用 on_cancel_check)
-        _request_cancelled = [False]
+        stream = None
 
         try:
             # C-006: 用 socket 默认超时把 DNS 解析包含在连接超时内；
             # stream 对象返回后已建立连接，随即恢复旧超时。
             with _socket_dns_timeout(self._HTTP_TIMEOUT_CONNECT):
                 # 构建请求参数 — 思考模式 vs 非思考模式
-                create_kwargs = dict(
-                    model=use_model,
-                    messages=messages,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
-                if enable_thinking:
-                    create_kwargs["reasoning_effort"] = reasoning_effort
-                    create_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-                # 注入 OpenAI 原生 tools 定义，启用 DeepSeek V4 原生 function calling
-                try:
-                    from src.core.prompts.tool_descriptions import TOOL_DESCRIPTIONS
-                    if TOOL_DESCRIPTIONS:
-                        create_kwargs["tools"] = DeepSeekAPI._to_openai_tools(TOOL_DESCRIPTIONS)
-                except Exception:
-                    pass
+                create_kwargs = self._request_kwargs(use_model, messages, reasoning_effort, enable_thinking)
                 stream = client.chat.completions.create(**create_kwargs)
-        except _OPENAI_ERRORS as e:
-            code, msg = self._parse_error(e)
-            raise APIError(code, msg)
+        except APIError:
+            raise
         except Exception as e:
             code, msg = self._parse_error(e)
-            raise APIError(code, msg)
+            raise APIError(code, msg) from e
 
+        return self._consume_stream(stream, use_model, on_text, on_reasoning, on_cancel_check)
+
+    def _consume_stream(self, stream, use_model, on_text=None, on_reasoning=None, on_cancel_check=None):
+        full_content = ""
+        full_reasoning = ""
+        usage_summary = {}
+        _request_cancelled = [False]
         try:
             for chunk in stream:
                 # 每次迭代前检查取消
@@ -548,14 +596,13 @@ class DeepSeekAPI:
                 # usage chunk: choices 为空
                 if hasattr(chunk, "usage") and chunk.usage:
                     u = chunk.usage
-                    usage_summary = {
+                    usage_summary.update({
                         "prompt_tokens": getattr(u, "prompt_tokens", 0),
                         "completion_tokens": getattr(u, "completion_tokens", 0),
                         "total_tokens": getattr(u, "total_tokens", 0),
                         "prompt_cache_hit_tokens": getattr(u, "prompt_cache_hit_tokens", 0) or 0,
                         "prompt_cache_miss_tokens": getattr(u, "prompt_cache_miss_tokens", 0) or 0,
-                    }
-                    continue
+                    })
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -575,6 +622,10 @@ class DeepSeekAPI:
                         existing = [t for t in usage_summary["tool_calls"] if t.get("index") == idx]
                         if existing:
                             existing[0]["function"]["arguments"] += fn_args
+                            if fn_name:
+                                existing[0]["function"]["name"] += fn_name
+                            if getattr(tc, "id", None):
+                                existing[0]["id"] = tc.id
                         else:
                             usage_summary["tool_calls"].append({
                                 "index": idx,
@@ -598,10 +649,10 @@ class DeepSeekAPI:
                             logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
         except _OPENAI_ERRORS as e:
             code, msg = self._parse_error(e)
-            raise APIError(code, msg)
+            raise APIError(code, msg, need_retry=not (full_content or full_reasoning or usage_summary.get("tool_calls"))) from e
         except Exception as e:
             code, msg = self._parse_error(e)
-            raise APIError(code, msg)
+            raise APIError(code, msg, need_retry=not (full_content or full_reasoning or usage_summary.get("tool_calls"))) from e
         finally:
             try:
                 if stream is not None:
@@ -634,209 +685,16 @@ class DeepSeekAPI:
 
         thinking + reasoning_effort 同样会传递。
         """
-        # P0-001: 防止图片降级无限递归，超过 2 次重试直接抛错
-        if _vision_retry_count >= 2:
-            raise APIError(500, "图片理解降级失败，无法继续")
-
-        client = self._get_client()
-        if client is None:
-            raise APIError(401, "请先在设置中配置 API Key")
-
-        use_model = model or self.cfg.model
-        _reasoning_effort = reasoning_effort or self.cfg.get("reasoning_effort", "high")
-
         imgs = list(image_data_urls or [])
-
-        # 没有图片时，直接走普通 chat_stream
-        if not imgs:
-            return self.chat_stream(
-                messages, model=use_model,
-                on_text=on_text, on_reasoning=on_reasoning,
-                on_cancel_check=on_cancel_check,
-                reasoning_effort=_reasoning_effort,
-                enable_thinking=enable_thinking,
-            )
-
-        # 构造 multi-modal messages：找到最后一条 user 消息，把图片附加在其前面（同一条）
-        try:
-            multimodal_messages = self._build_vision_messages(messages, imgs)
-        except Exception:
-            multimodal_messages = list(messages)
-
-        full_content = ""
-        full_reasoning = ""
-        usage_summary = {}
-        stream = None  # 避免 finally 中 UnboundLocalError
-
-        # 取消状态容器
-        _request_cancelled = [False]
-
-        try:
-            # C-006: 用 socket 默认超时把 DNS 解析包含在连接超时内
-            with _socket_dns_timeout(self._HTTP_TIMEOUT_CONNECT):
-                create_kwargs = dict(
-                    model=use_model,
-                    messages=multimodal_messages,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
-                if enable_thinking:
-                    create_kwargs["reasoning_effort"] = _reasoning_effort
-                    create_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-                stream = client.chat.completions.create(**create_kwargs)
-        except _OPENAI_ERRORS as e:
-            msg_text = str(e).lower()
-            # C-001: 仅非降级调用且异常明确与 vision 相关时才降级
-            if not _is_degraded_call and any(k in msg_text for k in ("image", "vision", "multimodal", "does not support image", "images are not supported", "image input", "unsupported image", "unsupported vision", "unsupported multimodal")):
-                return self.chat_stream(
-                    messages, model=use_model,
-                    on_text=on_text, on_reasoning=on_reasoning,
-                    on_cancel_check=on_cancel_check,
-                    reasoning_effort=_reasoning_effort,
-                    enable_thinking=enable_thinking,
-                    _vision_retry_count=_vision_retry_count + 1,
-                    _is_degraded_call=True,
-                )
-            code, msg = self._parse_error(e)
-            raise APIError(code, msg)
-        except Exception as e:
-            # C-001: 非 vision 相关异常直接转换为 APIError，不再尝试降级
-            msg_text = str(e).lower()
-            if not _is_degraded_call and any(k in msg_text for k in ("image", "vision", "multimodal", "does not support image", "images are not supported", "image input", "unsupported image", "unsupported vision", "unsupported multimodal")):
-                try:
-                    return self.chat_stream(
-                        messages, model=use_model,
-                        on_text=on_text, on_reasoning=on_reasoning,
-                        on_cancel_check=on_cancel_check,
-                        reasoning_effort=_reasoning_effort,
-                        enable_thinking=enable_thinking,
-                        _vision_retry_count=_vision_retry_count + 1,
-                        _is_degraded_call=True,
-                    )
-                except APIError:
-                    raise
-                except Exception as e2:
-                    code, msg = self._parse_error(e2)
-                    raise APIError(code, msg)
-            code, msg = self._parse_error(e)
-            raise APIError(code, msg)
-
-        try:
-            vision_failed = False
-            for chunk in stream:
-                if on_cancel_check:
-                    try:
-                        if bool(on_cancel_check()):
-                            _request_cancelled[0] = True
-                            break
-                    except Exception as _exc:
-                        logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-                if _request_cancelled[0]:
-                    break
-
-                if hasattr(chunk, "usage") and chunk.usage:
-                    u = chunk.usage
-                    usage_summary = {
-                        "prompt_tokens": getattr(u, "prompt_tokens", 0),
-                        "completion_tokens": getattr(u, "completion_tokens", 0),
-                        "total_tokens": getattr(u, "total_tokens", 0),
-                        "prompt_cache_hit_tokens": getattr(u, "prompt_cache_hit_tokens", 0) or 0,
-                        "prompt_cache_miss_tokens": getattr(u, "prompt_cache_miss_tokens", 0) or 0,
-                    }
-                    continue
-
-                if not chunk.choices:
-                    continue
-
-                delta = chunk.choices[0].delta
-                reasoning = getattr(delta, "reasoning_content", None) \
-                         or getattr(delta, "reasoning", None) or ""
-                text = getattr(delta, "content", None) or ""
-
-                # 兼容一些服务端把不支持的字段放在 error 里
-                if not text and not reasoning:
-                    maybe_err = getattr(delta, "error", None) or getattr(chunk, "error", None)
-                    if maybe_err:
-                        err_str = str(maybe_err).lower()
-                        if any(k in err_str for k in ("image", "vision", "multimodal", "does not support image", "images are not supported", "image input", "unsupported image", "unsupported vision", "unsupported multimodal")):
-                            vision_failed = True
-                            break
-
-                if reasoning:
-                    full_reasoning += reasoning
-                    if on_reasoning:
-                        try:
-                            on_reasoning(reasoning)
-                        except Exception as _exc:
-                            logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-                if text:
-                    full_content += text
-                    if on_text:
-                        try:
-                            on_text(text)
-                        except Exception as _exc:
-                            logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-
-            if vision_failed:
-                # 流迭代中途已产生部分内容；若重新调用 chat_stream 会从头
-                # 再次推送，导致 GUI 重复渲染。直接返回当前已收集结果并标
-                # 记为 vision 降级（B-03）。
-                usage_summary["content"] = full_content
-                usage_summary["reasoning_content"] = full_reasoning
-                usage_summary["cancelled"] = _request_cancelled[0]
-                usage_summary["used_vision"] = True
-                usage_summary["vision_degraded"] = True
-                usage_summary.update(self._calc_cost(usage_summary, use_model))
-                return usage_summary
-        except _OPENAI_ERRORS as e:
-            msg_text = str(e).lower()
-            # C-001: 仅非降级调用且异常明确与 vision 相关时才降级
-            if not _is_degraded_call and any(k in msg_text for k in ("image", "vision", "multimodal", "does not support image", "images are not supported", "image input", "unsupported image", "unsupported vision", "unsupported multimodal")):
-                return self.chat_stream(
-                    messages, model=use_model,
-                    on_text=on_text, on_reasoning=on_reasoning,
-                    on_cancel_check=on_cancel_check,
-                    reasoning_effort=_reasoning_effort,
-                    enable_thinking=enable_thinking,
-                    _vision_retry_count=_vision_retry_count + 1,
-                    _is_degraded_call=True,
-                )
-            code, msg = self._parse_error(e)
-            raise APIError(code, msg)
-        except Exception as e:
-            # C-001: 非 vision 相关异常直接转换为 APIError，不再尝试降级
-            msg_text = str(e).lower()
-            if not _is_degraded_call and any(k in msg_text for k in ("image", "vision", "multimodal", "does not support image", "images are not supported", "image input", "unsupported image", "unsupported vision", "unsupported multimodal")):
-                try:
-                    return self.chat_stream(
-                        messages, model=use_model,
-                        on_text=on_text, on_reasoning=on_reasoning,
-                        on_cancel_check=on_cancel_check,
-                        reasoning_effort=_reasoning_effort,
-                        enable_thinking=enable_thinking,
-                        _vision_retry_count=_vision_retry_count + 1,
-                        _is_degraded_call=True,
-                    )
-                except APIError:
-                    raise
-                except Exception as e2:
-                    code, msg = self._parse_error(e2)
-                    raise APIError(code, msg)
-            code, msg = self._parse_error(e)
-            raise APIError(code, msg)
-        finally:
-            try:
-                if stream is not None:
-                    stream.close()
-            except Exception as _exc:
-                logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-
-        usage_summary["content"] = full_content
-        usage_summary["reasoning_content"] = full_reasoning
-        usage_summary["cancelled"] = _request_cancelled[0]
-        usage_summary["used_vision"] = True
-        usage_summary.update(self._calc_cost(usage_summary, use_model))
-        return usage_summary
+        capabilities = self.cfg.get("provider_capabilities", {}) or {}
+        if imgs and capabilities.get("vision") is False:
+            raise APIError(400, "当前供应商已禁用图片输入，请选择支持图片的模型", need_retry=False)
+        prepared = self._build_vision_messages(messages, imgs) if imgs else messages
+        result = self.chat_stream(prepared, model=model, on_text=on_text,
+                                  on_reasoning=on_reasoning, on_cancel_check=on_cancel_check,
+                                  reasoning_effort=reasoning_effort, enable_thinking=enable_thinking)
+        result["used_vision"] = bool(imgs)
+        return result
 
     # ----- 工具: 把最后一条用户消息转为多模态格式 -----
     def _build_vision_messages(self, messages: List[Dict], image_data_urls: List[str]) -> List[Dict]:

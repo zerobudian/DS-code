@@ -1,0 +1,47 @@
+const {_electron}=require('playwright');
+const path=require('node:path');
+const root=path.resolve(__dirname,'..');
+const electron=require('electron');
+const assert=require('node:assert/strict');
+(async()=>{
+ const app=await _electron.launch({executablePath:electron,args:['--no-sandbox',root],timeout:20000});
+ try {
+  const page=await app.firstWindow();const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('dialog',async dialog=>{errors.push(dialog.message());await dialog.dismiss();});
+  await page.waitForFunction(()=>document.getElementById('st-model')?.textContent==='test-model');
+  await page.evaluate(()=>{window.newChat();});
+  await page.locator('.dialog-panel textarea').fill('electron-chat-test');
+  await page.locator('.dialog-panel button[type=submit]').click();
+  const project=page.locator('.pj-item').filter({hasText:'electron-chat-test'});
+  await project.waitFor();
+  await page.waitForFunction(()=>document.getElementById('todo-count')?.dataset.revision?.length>0);
+  await page.locator('#todo-input').fill('persist desktop task');await page.locator('#todo-input').press('Enter');
+  await page.locator('.todo-text').filter({hasText:'persist desktop task'}).waitFor();
+  await project.click({button:'right'});await page.locator('#pj-menu').getByText('置顶',{exact:true}).click();
+  await page.waitForFunction(()=>Array.from(document.querySelectorAll('.pj-item')).some(p=>p.textContent.includes('📌')));
+  await page.locator('#input-box').fill('native-tool-test');await page.locator('#btn-send').click();
+  await page.locator('.ai-inner.done').waitFor();
+  assert.equal(await page.locator('.code-block code').textContent(),'print(42)');
+  await page.locator('.project-file').filter({hasText:'hello.py'}).click();
+  assert.equal(await page.locator('.dialog-panel textarea').inputValue(),'print(42)\n');
+  await page.locator('.dialog-panel button[type=submit]').click();
+  await page.locator('#attachment-input').setInputFiles({name:'note.txt',mimeType:'text/plain',buffer:Buffer.from('desktop attachment contents')});
+  await page.locator('#attachment-list button').waitFor();
+  await page.locator('#input-box').fill('attachment-test');await page.locator('#btn-send').click();
+  await page.waitForFunction(()=>document.querySelectorAll('.ai-inner.done').length===2);
+  await page.reload();await page.waitForFunction(()=>document.querySelectorAll('.code-block code').length===2);
+  assert.equal(await page.locator('.code-block code').first().textContent(),'print(42)');
+  await page.locator('.todo-text').filter({hasText:'persist desktop task'}).waitFor();
+  assert.equal(await page.locator('.tool-card .tool-dot.ok').count(),1);
+  assert.match(await page.locator('.pj-item.sel').textContent(),/📌/);
+  await page.locator('.project-file').filter({hasText:'note.txt'}).waitFor();
+  await page.evaluate(()=>window.openSettings());
+  await page.locator('.ds-advanced summary').click();
+  await page.locator('#ds-context-tokens').waitFor();
+  await page.locator('#ds-context-tokens').fill('64000');await page.locator('#ds-save-capabilities').click();
+  await page.locator('#ds-save-capabilities').getByText('已保存 / Saved',{exact:true}).waitFor();
+  await page.evaluate(()=>window.closeDetailSettings());
+  assert.deepEqual(errors,[]);
+  if(process.env.DSCODE_SMOKE_SCREENSHOT)await page.screenshot({path:process.env.DSCODE_SMOKE_SCREENSHOT});
+  console.log('Native Electron smoke passed: owned Sidecar, auth, project, persistent Todo/Pin, native tools, file preview, real attachments, context settings, Markdown, reload history, zero page errors.');
+ } finally {await app.close();}
+})().catch(e=>{console.error(e);process.exit(1);});

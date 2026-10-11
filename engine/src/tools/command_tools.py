@@ -69,7 +69,7 @@ def _safe_terminate(proc: Optional[subprocess.Popen], force_kill: bool = False) 
 
     def _send(sig: int) -> None:
         try:
-            if pgid is not None and pgid > 0:
+            if pgid == proc.pid and pgid != os.getpgrp():
                 os.killpg(pgid, sig)
             else:
                 os.kill(proc.pid, sig)
@@ -1830,7 +1830,7 @@ class CommandTools:
             return False, f"[calculator] 计算失败: {e}"
 
     # -------- 持久终端会话 --------
-    def _get_terminal(self):
+    def _get_terminal(self, create=False):
         """获取或创建持久终端（懒加载，带锁防止并发创建多个进程）"""
         with self._terminal_lock:
             term = getattr(self._exec, "_persistent_terminal", None)
@@ -1843,7 +1843,7 @@ class CommandTools:
                 except Exception:
                     pass
                 self._exec._persistent_terminal = None
-            if self._exec.sandbox is None:
+            if not create or self._exec.sandbox is None:
                 return None
             from src.tools.terminal_manager import TerminalManager
             cwd = str(self._exec.sandbox.work_dir)
@@ -1860,7 +1860,7 @@ class CommandTools:
 
     def shell_start(self, call) -> Tuple[bool, str]:
         """启动或重启持久shell会话"""
-        term = self._get_terminal()
+        term = self._get_terminal(create=True)
         if term is None:
             return False, "[shell_start] 无法启动shell（请检查bash/sh是否可用）"
         return True, f"[shell_start] 持久shell已启动 (cwd={term.cwd})"
@@ -1947,6 +1947,9 @@ class CommandTools:
         output_lines: List[str] = []
         exit_code = -1
         while time.time() < deadline:
+            if self._exec.on_cancel_check and self._exec.on_cancel_check():
+                term.terminate()
+                return False, "[shell_exec] 已取消，终端已停止"
             time.sleep(0.1)
             out = term.read_output(clear=True)
             if out:
@@ -1966,8 +1969,11 @@ class CommandTools:
         if len(result) > 8000:
             result = result[:8000] + "\n... (输出已截断)"
 
+        if exit_code < 0:
+            term.terminate()
+            return False, f"[shell_exec] 超时或终端已退出，终端已停止\n{result}"
         status = "✓" if exit_code == 0 else f"✗ (exit={exit_code})"
-        return True, f"[shell_exec] {status}\n{result}"
+        return exit_code == 0, f"[shell_exec] {status}\n{result}"
 
     def shell_send(self, call) -> Tuple[bool, str]:
         """向持久shell发送命令（不等待完成）"""
@@ -1978,7 +1984,7 @@ class CommandTools:
         if self._exec._subagent_restrictions.get("forbid_commands", False):
             return False, "[shell_send] 子代理不允许执行 shell 命令"
         # reviewer模式禁止
-        from ..config import Config
+        from src.core.config import Config
         if Config().permission_mode == "reviewer":
             return False, "[shell_send] reviewer模式下禁止执行shell命令"
         # 危险模式预扫描

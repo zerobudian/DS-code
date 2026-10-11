@@ -56,7 +56,9 @@
 
     <div id="input-area">
       <div id="cmd-popup"></div>
-      <button id="btn-attach" title="Upload">+</button>
+      <button id="btn-attach" title="添加附件 / Attach files">+</button>
+      <input id="attachment-input" type="file" multiple hidden>
+      <div id="attachment-list" aria-live="polite"></div>
       <textarea id="input-box" rows="1" data-i18n-placeholder="input_placeholder"></textarea>
       <button id="btn-send" onclick="sendMessage()">➤</button>
       <button id="btn-stop" onclick="stopChat()" class="hidden">■</button>
@@ -86,11 +88,11 @@
     <div class="rp-card" id="rp-file-card">
       <div class="rp-card-hdr" onclick="this.parentElement.classList.toggle('collapsed')">
         <span class="rp-card-title" data-i18n="files_title">文件列表</span>
-        <button class="rp-folder-btn" onclick="event.stopPropagation();openProjectFolder()" title="在 Finder 中打开">📂</button>
+        <button class="rp-folder-btn" onclick="event.stopPropagation();openProjectFolder()" title="查看项目文件 / View project files">📂</button>
         <span class="rp-chevron">▾</span>
       </div>
       <div class="rp-card-body">
-        <p class="rp-empty" data-i18n="files_empty">选择项目后显示文件</p>
+        <div id="file-list"><p class="rp-empty" data-i18n="files_empty">选择项目后显示文件</p></div>
       </div>
     </div>
   </aside>
@@ -126,6 +128,12 @@
       <div class="ds-sec"><label data-i18n="ds_theme">Theme</label><div class="qs-row" id="ds-theme"></div></div>
 	      <div class="ds-sec"><label data-i18n="qs_model">Model</label><div class="qs-row" id="ds-model"></div></div>
       <div class="ds-sec"><label data-i18n="ds_permission">Permission</label><div class="qs-row" id="ds-permission"></div></div>
+      <details class="ds-advanced"><summary>供应商能力与上下文 / Provider capabilities</summary>
+        <label>上下文预算 / Context tokens <input id="ds-context-tokens" type="number" min="1024" max="1048576"></label>
+        <div id="ds-capabilities"></div>
+        <p>Auto 按模型选择字段；实际能力及预算需符合供应商设置。</p>
+        <button id="ds-save-capabilities" onclick="saveCapabilities()">保存 / Save</button>
+      </details>
     </div>
 
     <div id="ds-tab-provider" class="ds-tab-page" style="display:none">
@@ -133,6 +141,7 @@
       <div class="ds-sec"><label data-i18n="ds_add_provider">Add Provider</label>
         <input id="ds-new-prov-name" type="text" data-i18n-placeholder="ds_prov_name_ph" placeholder="Provider Name" style="margin-bottom:4px">
         <input id="ds-new-prov-key" type="password" data-i18n-placeholder="ds_prov_key_ph" placeholder="API Key" style="margin-bottom:4px">
+        <input id="ds-new-prov-model" type="text" placeholder="Model name" style="margin-bottom:4px">
         <input id="ds-new-prov-url" type="text" data-i18n-placeholder="ds_prov_url_ph" placeholder="Base URL">
         <button onclick="addProvider()" style="margin-top:6px;width:100%;padding:6px;border-radius:6px;border:1px solid var(--border);background:var(--accent);color:#fff;cursor:pointer;font-size:12px" data-i18n="ds_btn_add">Add</button>
       </div>
@@ -236,6 +245,9 @@
 <div id="ee-overlay" onclick="this.classList.remove('show')"><img src="../assets/ee.png" alt="🐳"></div>
 <script src="js/i18n.js?v=2.0.1-0712"></script>
 <script src="js/utils.js?v=2.0.1-0712"></script>
+<script src="js/dialogs.js"></script>
+<script src="js/chat-client.js"></script>
+<script src="js/project-client.js"></script>
 <script src="js/app.js?v=2.0.1-0712"></script>
 </body>
 </html>

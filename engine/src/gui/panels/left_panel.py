@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from PySide6.QtCore import (
     Qt, QSize, Signal, QPropertyAnimation, QEasingCurve, QEvent,
-    QPoint, Property,
+    QPoint, Property, QTimer,
 )
 from PySide6.QtGui import (
     QPixmap, QIcon, QColor, QPainter, QPen, QBrush, QTextCursor,

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 import hashlib
 import json
+import copy
 import threading
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -333,7 +334,7 @@ class MemoryManager:
         with self._lock:
             self._ensure_loaded()
             self._invalidate_search_cache()
-            item = self._items.get(mem_id)
+            item = copy.deepcopy(self._items.get(mem_id))
             if item is None:
                 return False
             changed = False
@@ -363,6 +364,7 @@ class MemoryManager:
             if changed:
                 item["updated_at"] = _now_iso()
                 if self._write_json(self._item_path(mem_id), item):
+                    self._items[mem_id] = item
                     self.save()
                     return True
                 return False
@@ -375,13 +377,14 @@ class MemoryManager:
             self._invalidate_search_cache()
             if mem_id not in self._items:
                 return False
-            self._items.pop(mem_id, None)
             path = self._item_path(mem_id)
             try:
                 if path.exists():
                     path.unlink()
             except OSError as exc:
                 print(f"[MemoryManager] 删除 {path.name} 失败: {exc}")
+                return False
+            self._items.pop(mem_id, None)
             self.save()
             return True
 
@@ -393,12 +396,12 @@ class MemoryManager:
         with self._lock:
             self._ensure_loaded()
             item = self._items.get(mem_id)
-            return dict(item) if item is not None else None
+            return copy.deepcopy(item) if item is not None else None
 
     def list_all(self) -> List[Dict[str, Any]]:
         with self._lock:
             self._ensure_loaded()
-            items = [dict(it) for it in self._items.values()]
+            items = [copy.deepcopy(it) for it in self._items.values()]
             items.sort(key=lambda it: it.get("updated_at", ""), reverse=True)
             return items
 
@@ -418,7 +421,7 @@ class MemoryManager:
             cache_hash = self._hash_search_key(key)
 
             if self._search_cache_hash == cache_hash and self._search_cache_result is not None:
-                return [dict(it) for it in self._search_cache_result]
+                return copy.deepcopy(self._search_cache_result)
 
             results: List[Dict[str, Any]] = []
             for item in self._items.values():
@@ -432,7 +435,7 @@ class MemoryManager:
                     haystack = f"{item.get('title', '')}\n{item.get('content', '')}".lower()
                     if kw not in haystack:
                         continue
-                results.append(dict(item))
+                results.append(copy.deepcopy(item))
 
             results.sort(key=lambda it: it.get("updated_at", ""), reverse=True)
             results = results[: max(0, int(limit))]

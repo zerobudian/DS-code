@@ -21,6 +21,7 @@ import stat
 import threading
 import time
 import unicodedata
+import weakref
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -36,69 +37,15 @@ _WIN_RESERVED_NAMES = frozenset({
 
 
 def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> bool:
-    """原子写入文本文件：在已验证的父目录 fd 内创建临时文件再 os.replace，
-    避免写入一半被读，并防止目标/父目录被替换为符号链接导致的沙箱逃逸。
-    """
-    target = Path(path)
-    parent = target.parent
-    try:
-        # 打开父目录并禁止跟随符号链接；若父目录是 symlink，直接失败
-        _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
-        _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-        dir_fd = os.open(str(parent), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
-    except OSError:
-        return False
-    tmp_name: Optional[str] = None
-    tmp_fd: Optional[int] = None
-    try:
-        # 在 dir_fd 对应的目录中创建唯一临时文件（O_EXCL | O_NOFOLLOW）
-        for _ in range(10):
-            tmp_name = f".tmp_{os.getpid()}_{os.urandom(8).hex()}"
-            try:
-                tmp_fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
-                                 0o600, dir_fd=dir_fd)
-                break
-            except FileExistsError as _exc:
-                logger.debug("跳过异常项: %s", _exc, exc_info=True)
-                continue
-        if tmp_fd is None:
-            return False
-        try:
-            with os.fdopen(tmp_fd, "w", encoding=encoding, closefd=True) as f:
-                f.write(text)
-            # 在已验证的目录 fd 内原子替换目标文件
-            os.replace(tmp_name, target.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-            # M-003: 创建/替换后限制文件权限为 0o600
-            try:
-                os.chmod(str(target), 0o600, follow_symlinks=False)
-            except OSError as e:
-                logger.warning("[_atomic_write_text] 设置权限 0o600 失败: %s (%s)", target, e)
-            return True
-        except Exception:
-            # fdopen 成功时 closefd=True 会自动关闭 fd；fdopen 失败时需手动关闭
-            try:
-                os.close(tmp_fd)
-            except OSError:
-                pass
-            try:
-                if tmp_name:
-                    os.unlink(tmp_name, dir_fd=dir_fd)
-            except Exception as _exc:
-                logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-            return False
-    finally:
-        try:
-            os.close(dir_fd)
-        except Exception as _exc:
-            logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
+    from src.core.atomic_files import atomic_write_bytes
+    return atomic_write_bytes(path, text.encode(encoding))
 
 
 def _atomic_write_json(path: Path, data) -> bool:
     """原子化写入 JSON 文件。对数据合法性做最小校验，避免写一半损坏。"""
     try:
         # 只允许 JSON 可序列化的基本类型；拒绝自定义对象
-        text = json.dumps(data, ensure_ascii=False, indent=2,
-                          default=lambda o: getattr(o, "__dict__", str(o)))
+        text = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False)
     except (TypeError, ValueError) as e:
         logger.info("[ProjectSandbox] JSON 序列化失败")
         logger.debug("[ProjectSandbox] JSON 序列化失败: %s", e, exc_info=True)
@@ -231,10 +178,20 @@ class ProjectSandbox:
     # 项目根目录下回收站文件夹名称（英文，按要求固定）
     RECYCLE_BIN_NAME = "RecycleBin"
 
+    _locks = weakref.WeakValueDictionary()
+    _locks_guard = threading.Lock()
+
     def __init__(self, name: str, root: Path):
+        raw_root = Path(root).absolute()
+        if raw_root.is_symlink():
+            raise ValueError("Project root cannot be a symbolic link")
+        for child in ("work", "preview", "history", self.RECYCLE_BIN_NAME, "DS.md", "meta.json"):
+            if (raw_root / child).is_symlink():
+                raise ValueError("Project data cannot be a symbolic link")
         self.name = unicodedata.normalize("NFC", str(name))
         self.root = Path(root).resolve()
-        self._lock = threading.RLock()  # 保护对 meta/ds_md 等共享资源的读写
+        with self._locks_guard:
+            self._lock = self._locks.setdefault(str(self.root), threading.RLock())
         self.work_dir = self.root / "work"
         self.preview_dir = self.root / "preview"
         self.history_dir = self.root / "history"
@@ -247,7 +204,8 @@ class ProjectSandbox:
             d.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         if not self.ds_md.exists():
-            self.ds_md.write_text(_build_default_ds_md(name), encoding="utf-8")
+            if not _atomic_write_text(self.ds_md, _build_default_ds_md(name)):
+                raise OSError("Failed to initialize DS.md")
             try:
                 os.chmod(str(self.ds_md), 0o600, follow_symlinks=False)
             except OSError as e:
@@ -316,31 +274,10 @@ class ProjectSandbox:
             logger.warning("[ProjectSandbox] 设置 DS.md 权限 0o600 失败: %s (%s)", self.ds_md, e)
 
     # ---------- meta ----------
-    def _save_meta(self, meta: Dict):
-        """原子化保存项目元信息（线程安全：持锁写入）。"""
+    def _save_meta(self, meta: Dict) -> bool:
+        """Persist metadata atomically and report the actual write result."""
         with self._lock:
-            try:
-                if not isinstance(meta, dict):
-                    meta = {}
-                ok = _atomic_write_json(self.meta_file, meta)
-                if ok:
-                    try:
-                        os.chmod(str(self.meta_file), 0o600, follow_symlinks=False)
-                    except OSError as e:
-                        logger.warning("[ProjectSandbox] 设置 meta.json 权限 0o600 失败: %s (%s)", self.meta_file, e)
-                else:
-                    try:
-                        with open(self.meta_file, "w", encoding="utf-8") as f:
-                            json.dump(meta, f, ensure_ascii=False, indent=2)
-                        try:
-                            os.chmod(str(self.meta_file), 0o600, follow_symlinks=False)
-                        except OSError as e:
-                            logger.warning("[ProjectSandbox] 设置 meta.json 权限 0o600 失败: %s (%s)", self.meta_file, e)
-                    except Exception as _exc:
-                        logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-            except Exception as e:
-                logger.info("[ProjectSandbox] _save_meta 失败")
-                logger.debug("[ProjectSandbox] _save_meta 失败: %s", e, exc_info=True)
+            return isinstance(meta, dict) and _atomic_write_json(self.meta_file, meta)
 
     def _load_meta(self) -> Dict:
         """以字节形式读取元信息（线程安全：持锁读取）。"""
@@ -401,8 +338,7 @@ class ProjectSandbox:
             if user_initiated:
                 meta["renamed_by_user"] = True
             meta["last_access"] = time.time()
-            self._save_meta(meta)
-            return True
+            return self._save_meta(meta)
 
     def is_pinned(self) -> bool:
         meta = self._load_meta()
@@ -518,32 +454,8 @@ class ProjectSandbox:
         return re.sub(r'@import\s+["\']([^"\']+)["\']', _replace_import, text)
 
     def write_ds_md(self, content: str) -> bool:
-        """整体写入 DS.md（线程安全：持锁写入）。"""
         with self._lock:
-            try:
-                text = str(content or "")
-                ok = _atomic_write_text(self.ds_md, text)
-                if ok:
-                    try:
-                        os.chmod(str(self.ds_md), 0o600, follow_symlinks=False)
-                    except OSError as e:
-                        logger.warning("[ProjectSandbox] 设置 DS.md 权限 0o600 失败: %s (%s)", self.ds_md, e)
-                    return True
-                try:
-                    self.ds_md.write_text(text, encoding="utf-8")
-                    try:
-                        os.chmod(str(self.ds_md), 0o600, follow_symlinks=False)
-                    except OSError as e:
-                        logger.warning("[ProjectSandbox] 设置 DS.md 权限 0o600 失败: %s (%s)", self.ds_md, e)
-                    return True
-                except Exception as e2:
-                    logger.info("[ProjectSandbox] DS.md fallback 写入失败")
-                    logger.debug("[ProjectSandbox] DS.md fallback 写入失败: %s", e2, exc_info=True)
-                    return False
-            except Exception as e:
-                logger.info("[ProjectSandbox] 写入 DS.md 失败")
-                logger.debug("[ProjectSandbox] 写入 DS.md 失败: %s", e, exc_info=True)
-            return False
+            return _atomic_write_text(self.ds_md, str(content or ""))
 
     def read_section(self, section_key: str) -> str:
         if section_key not in DS_SECTIONS:
@@ -559,53 +471,39 @@ class ProjectSandbox:
             new_content = _replace_section(content, section_key, body)
             return self.write_ds_md(new_content)
 
+    def replace_tasks(self, tasks: List[Dict]) -> bool:
+        """Update pending and completed sections in one atomic write."""
+        if not isinstance(tasks, list) or len(tasks) > 1000:
+            return False
+        for item in tasks:
+            if (not isinstance(item, dict) or type(item.get("done")) is not bool
+                    or not isinstance(item.get("text"), str) or not item["text"].strip()
+                    or len(item["text"]) > 4096 or "\n" in item["text"] or "\r" in item["text"]):
+                return False
+        with self._lock:
+            content = self.read_ds_md()
+            for section, done in (("pending", False), ("completed", True)):
+                body = "\n".join(f"- [{'x' if done else ' '}] {t['text'].strip()}"
+                                 for t in tasks if t["done"] is done)
+                content = _replace_section(content, section, body)
+            return self.write_ds_md(content)
+
     def move_task_to_completed(self, task_text: str) -> bool:
-        if not task_text or not str(task_text).strip():
+        if not isinstance(task_text, str) or not task_text.strip():
             return False
-        sections = _parse_sections(self.read_ds_md())
-        pending = sections.get("pending", "")
-        completed = sections.get("completed", "")
-
-        new_pending_lines = []
-        found = False
-        for line in pending.splitlines():
-            m = re.match(r"^\s*[-*]\s*\[\s*\]\s*(.+)$", line)
-            if m and task_text.strip() in m.group(1).strip():
-                found = True
-                continue
-            new_pending_lines.append(line)
-        if not found:
-            for line in pending.splitlines():
-                if task_text.strip() in line and "[ ]" in line:
-                    found = True
-                    new_pending_lines = [l for l in pending.splitlines() if l != line]
-                    break
-        if not found:
+        with self._lock:
+            tasks = self.get_tasks()
+            for item in tasks:
+                if not item["done"] and item["text"] == task_text.strip():
+                    item["done"] = True
+                    return self.replace_tasks(tasks)
             return False
-
-        new_pending = "\n".join(new_pending_lines).strip() or "（暂无未完成任务）"
-        default_empty = "（暂无已完成任务）"
-        if completed.strip() == default_empty:
-            new_completed = f"- [x] {task_text.strip()}"
-        else:
-            new_completed = completed.strip() + "\n" + f"- [x] {task_text.strip()}"
-
-        self.write_section("pending", new_pending)
-        if not self.write_section("completed", new_completed):
-            # 回滚：将任务放回 pending
-            self.write_section("pending", pending)
-            return False
-        return True
 
     def add_pending_task(self, task_text: str) -> bool:
-        if not task_text or not str(task_text).strip():
+        if not isinstance(task_text, str) or not task_text.strip():
             return False
-        body = self.read_section("pending")
-        if body.startswith("（") and "暂" in body:
-            new_body = f"- [ ] {task_text.strip()}"
-        else:
-            new_body = body.strip() + "\n" + f"- [ ] {task_text.strip()}"
-        return self.write_section("pending", new_body)
+        with self._lock:
+            return self.replace_tasks(self.get_tasks() + [{"text": task_text.strip(), "done": False}])
 
     def get_tasks(self) -> List[Dict]:
         sections = _parse_sections(self.read_ds_md())
@@ -652,6 +550,8 @@ class ProjectSandbox:
             return None
 
         base = self.work_dir if is_work else self.preview_dir
+        if base.is_symlink():
+            return None
         try:
             base.mkdir(parents=True, exist_ok=True, mode=0o700)
         except Exception:
@@ -668,8 +568,8 @@ class ProjectSandbox:
             return None
 
         # 显式拒绝 . / .. 作为独立段（即使 resolve 会归一化，也提前拒绝可疑输入）
-        rel_obj = Path(rel_str)
-        if "." in rel_obj.parts or ".." in rel_obj.parts:
+        rel_str = rel_str.replace("\\", "/")
+        if any(part in {".", ".."} for part in rel_str.split("/")):
             return None
 
         try:
@@ -831,7 +731,7 @@ class ProjectSandbox:
                 return False
             if not isinstance(content, str):
                 content = str(content or "")
-            if len(content) > self._MAX_WRITE_BYTES:
+            if len(content.encode("utf-8")) > self._MAX_WRITE_BYTES:
                 logger.info("[ProjectSandbox] 写入被拒绝 (超出单文件上限): %s", rel_path)
                 return False
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1145,7 +1045,7 @@ class ProjectManager:
         try:
             for p in sorted(self.projects_root.iterdir()):
                 try:
-                    if not p.is_dir() or p.name.startswith("."):
+                    if p.is_symlink() or not p.is_dir() or p.name.startswith("."):
                         continue
                     sb = ProjectSandbox(p.name, p)
                     meta = sb.get_meta()
@@ -1205,7 +1105,7 @@ class ProjectManager:
             return None
         name = unicodedata.normalize("NFC", name.strip())
         # H-007：拒绝空名、纯点号、以点开头/结尾
-        if not name or name in (".", "..") or name.startswith(".") or name.endswith("."):
+        if not name or len(name.encode("utf-8")) > 200 or name in (".", "..") or name.startswith(".") or name.endswith("."):
             return None
         if name.startswith("-"):
             return None
@@ -1228,9 +1128,12 @@ class ProjectManager:
         if not self._safe_project_name(name):
             return None
         root = self.projects_root / name
-        if not root.exists():
+        if root.is_symlink() or not root.is_dir():
             return None
-        return ProjectSandbox(name, root)
+        try:
+            return ProjectSandbox(name, root)
+        except (OSError, ValueError):
+            return None
 
     def create(self, name: str, display_name: Optional[str] = None) -> Optional[ProjectSandbox]:
         if not self._safe_project_name(name):
@@ -1238,6 +1141,8 @@ class ProjectManager:
             return None
         root = self.projects_root / name
         with self._lock:
+            if root.is_symlink():
+                return None
             try:
                 root.mkdir(parents=True, exist_ok=True, mode=0o700)
             except FileExistsError:
@@ -1249,7 +1154,10 @@ class ProjectManager:
             except Exception as _exc:
                 logger.warning("创建项目失败：%s", _exc, exc_info=True)
                 return None
-            sb = ProjectSandbox(name, root)
+            try:
+                sb = ProjectSandbox(name, root)
+            except (OSError, ValueError):
+                return None
             if display_name:
                 sb.set_display_name(display_name, user_initiated=False)
         # M-018: 审计日志（项目创建）
@@ -1299,6 +1207,8 @@ class ProjectManager:
         with self._lock:
             # H-003: 删除 dst.exists() 前置检查，直接使用原子 rename。
             # FileExistsError 表示目标在检查窗口内被创建，按竞态处理。
+            if src.is_symlink() or dst.exists() or dst.is_symlink():
+                return False
             try:
                 src.rename(dst)
                 return True

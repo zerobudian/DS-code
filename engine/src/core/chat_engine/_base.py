@@ -7,7 +7,44 @@
 """
 from __future__ import annotations
 
-from src.core.chat_engine._imports import *  # noqa: F401, F403
+from src.core.chat_engine._imports import (
+    APIError,
+    Any,
+    ArtifactManager,
+    Callable,
+    Config,
+    ConfirmationGate,
+    ConversationHistory,
+    DEFAULT_MAX_TURN_TIME,
+    DeepSeekAPI,
+    Dict,
+    FileSystemMonitor,
+    KunRuntime,
+    List,
+    Optional,
+    Path,
+    ProjectSandbox,
+    ToolExecutor,
+    _ImageDocumentManagerLike,
+    _MCPManagerLike,
+    _SklIIIManagerLike,
+    _SubAgentEngineLike,
+    json,
+    re,
+    threading,
+    time,
+)
+
+import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.core.auto_memory import AutoMemory
+    from src.core.long_term_memory import LongTermMemory
+    from src.core.session_memory import SessionMemory
+    from src.core.user_profile_memory import UserProfileMemory
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -23,6 +60,11 @@ class ChatEngineBase(object):
     _MAX_TOOL_RETRIES = 1
 
     def __init__(self):
+        self._balance_lock = threading.RLock()
+        self._balance_last_call = 0.0
+        self._balance_running = False
+        self._project_generation = 0
+        self._closed = False
         self.cfg = Config()
         self.api = DeepSeekAPI()
         # 核心依赖使用真实类型，便于 mypy 与 IDE 静态检查，避免 object 上的未知属性调用
@@ -44,6 +86,7 @@ class ChatEngineBase(object):
         # L-014: 防止发送按钮重复提交，确保同一时刻只有一个 send_message 在执行
         self._send_lock = threading.Lock()
         self._send_in_progress: bool = False
+        self._active_cancel_event = None
         # 受 _state_lock 保护的标志统一放在 _state dict，避免分散的 torn read。
         # 使用 Dict[str, Any] 因为内部存储多种类型（bool/str/float/list/None），
         # 所有读取都通过 _state_cost / _state_int 等带类型转换的辅助方法完成。
@@ -74,7 +117,7 @@ class ChatEngineBase(object):
         self._subagent: Optional[_SubAgentEngineLike] = None  # 子代理引擎（懒加载，set_project 中初始化）
         # 用户可能显式发送 "/plan" "/undo" 等命令 — 由本类拦截处理
         self._COMMANDS = {"/clear", "/reset", "/undo", "/snapshot", "/restore",
-                          "/snapshots", "/plan", "/ultra", "/help", "/hook", "/lsp"}
+                          "/snapshots", "/plan", "/ultra", "/normal", "/help", "/hook", "/lsp"}
 
         # ========== 回调接口 (GUI 或 CLI 自行设置) ==========
         self.on_status_update: Optional[Callable[[str], None]] = None
@@ -193,7 +236,33 @@ class ChatEngineBase(object):
     def _is_stopped(self) -> bool:
         """读取停止标志 — 线程安全（一次加锁读取避免 torn read）"""
         with self._state_lock:
-            return bool(self._state.get("stop_requested")) or bool(self._state.get("stop"))
+            return (bool(self._state.get("stop_requested")) or bool(self._state.get("stop"))
+                    or (self._active_cancel_event is not None and self._active_cancel_event.is_set()))
+
+    def cancel_pending_confirmations(self):
+        self._gate.cancel_all()
+
+    def get_pending_plan(self):
+        with self._state_lock:
+            return self._state.get("pending_plan")
+
+    def shutdown(self):
+        """Release background services and transports when the host exits."""
+        self._closed = True
+        self._project_generation += 1
+        self.stop()
+        self._fs_monitor.stop()
+        resources = ((self.mcp_manager, "stop_all"), (self.lsp_manager, "shutdown_all"),
+                     (self._subagent, "stop_all"), (self._subagent, "stop_watchdog"))
+        for manager, method in resources:
+            if manager is not None and hasattr(manager, method):
+                try:
+                    getattr(manager, method)()
+                except Exception:
+                    logger.exception("关闭后台服务失败: %s", method)
+        if self.tool_exec is not None:
+            self.tool_exec.shutdown()
+        self.api.close()
 
     def _get_model(self) -> str:
         """获取当前生效的模型名称。
@@ -319,8 +388,10 @@ class ChatEngineBase(object):
             logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
 
     # ========== 项目切换 ==========
-    def set_project(self, sandbox: ProjectSandbox):
+    def set_project(self, sandbox: Optional[ProjectSandbox]):
         """设置当前项目"""
+        self._project_generation += 1
+        self._code_vector_store = None
         # P1-9 修复: 切换项目前完整清理旧资源，防止MCP/子代理/文件监视器泄漏
         # stop() 已负责归档旧会话（mark_stopped + save_checkpoint + archive + 停止checkpoint线程）
         self.stop()
@@ -367,7 +438,16 @@ class ChatEngineBase(object):
         except Exception:
             logger.debug("set_project 清理旧 subagent 异常", exc_info=True)
 
+        if self.tool_exec is not None:
+            self.tool_exec.shutdown()
         self.sandbox = sandbox
+        if sandbox is None:
+            self._fs_monitor.stop()
+            self.history = self.tool_exec = None
+            self.mcp_manager = self.lsp_manager = self._subagent = None
+            self.memory_manager = self.auto_memory = self.long_term_memory = None
+            self.sklii_manager = self.image_doc_manager = self.hook_manager = self.skill_manager = None
+            return
         self.history = ConversationHistory(sandbox.history_dir)
 
         # MCP 管理器 (懒加载)
@@ -672,20 +752,23 @@ class ChatEngineBase(object):
         work_dir = getattr(self.sandbox, "work_dir", None)
         if not work_dir:
             return
+        sandbox, generation = self.sandbox, self._project_generation
         # 代码向量索引初始化移至后台线程，避免 sentence-transformers/torch
         # 在 NumPy 不兼容环境下导入时 segfault 导致主进程崩溃。
         def _init_cv():
             try:
                 from src.analysis.code_vector_store import CodeVectorStore
                 store = CodeVectorStore(work_dir)
-                self._code_vector_store = store
-                self._update_code_index_status(store.status)
                 store.index(force=False)
+                if self._closed or self.sandbox is not sandbox or self._project_generation != generation:
+                    return
+                self._code_vector_store = store
                 self._update_code_index_status(store.status)
             except Exception as _exc:
                 logger.info("代码向量索引初始化失败: %s", _exc)
-                self._code_vector_store = None
-                self._update_code_index_status("unavailable")
+                if not self._closed and self.sandbox is sandbox and self._project_generation == generation:
+                    self._code_vector_store = None
+                    self._update_code_index_status("unavailable")
         self._update_code_index_status("initializing")
         threading.Thread(target=_init_cv, daemon=True, name="CodeVectorInit").start()
 
@@ -782,7 +865,7 @@ class ChatEngineBase(object):
         return self._send_in_progress
 
     def send_message(self, user_text: str, uploaded_files: Optional[List[str]] = None,
-                     images: Optional[List[str]] = None):
+                     images: Optional[List[str]] = None, cancel_event=None, display_text=None):
         """发送用户消息入口。防止按钮重复提交，若已有请求在处理中则直接拒绝。"""
         if not self._send_lock.acquire(blocking=False):
             logger.warning("拒绝重复发送：已有请求正在处理中")
@@ -791,13 +874,17 @@ class ChatEngineBase(object):
             return
         self._send_in_progress = True
         try:
-            return self._send_message_impl(user_text, uploaded_files, images)
+            self._active_cancel_event = cancel_event
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            return self._send_message_impl(user_text, uploaded_files, images, display_text)
         finally:
+            self._active_cancel_event = None
             self._send_in_progress = False
             self._send_lock.release()
 
     def _send_message_impl(self, user_text: str, uploaded_files: Optional[List[str]] = None,
-                     images: Optional[List[str]] = None):
+                     images: Optional[List[str]] = None, display_text=None):
         """发送用户消息 -> 斜杠命令或两阶段 (Planning / Execution)
 
         对 history/sandbox/API 调用异常均有防御，确保中途异常不会让 history 内存状态与磁盘不一致。
@@ -971,7 +1058,7 @@ class ChatEngineBase(object):
                     self.on_error(0, "历史记录未初始化")
                 return
             try:
-                self.history.add_user_message(full_user_text)
+                self.history.add_user_message(full_user_text, display_content=display_text if display_text is not None else user_text)
             except Exception as e:
                 print(f"[ChatEngine] history.add_user_message 失败: {e}")
                 if self.on_error:

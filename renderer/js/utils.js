@@ -7,27 +7,28 @@ function escapeHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/\n/g, '<br>');
+    .replace(/"/g, '&quot;');
 }
 
 /** 简单的 Markdown 渲染（代码块 + 行内代码 + 粗体） */
 function renderMarkdown(text) {
   if (!text) return '';
-  let result = escapeHtml(text);
-
-  // 代码块 ```...```
-  result = result.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
-    return `<pre class="code-block"><code>${escapeHtml(code.trim())}</code></pre>`;
-  });
-
-  // 行内代码 `...`
-  result = result.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-
-  // 粗体 **...**
-  result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-
-  return result;
+  function prose(value) {
+    return value.split(/(`[^`\n]+`)/g).map(part => {
+      if (part.startsWith('`') && part.endsWith('`')) {
+        return '<code class="inline-code">' + escapeHtml(part.slice(1, -1)) + '</code>';
+      }
+      return escapeHtml(part).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+    }).join('');
+  }
+  const pattern = /```[^\n]*\n([\s\S]*?)(?:```|$)/g;
+  let html = '', offset = 0, match;
+  while ((match = pattern.exec(text))) {
+    html += prose(text.slice(offset, match.index));
+    html += '<pre class="code-block"><code>' + escapeHtml(match[1].replace(/\n$/, '')) + '</code></pre>';
+    offset = pattern.lastIndex;
+  }
+  return html + prose(text.slice(offset));
 }
 
 /** 截断字符串 */

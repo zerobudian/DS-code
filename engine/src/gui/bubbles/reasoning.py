@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal, QTimer, QObject, QSize
+from PySide6.QtCore import Qt, Signal, QTimer, QObject, QSize, Property, QPropertyAnimation, QEasingCurve
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QPushButton, QSizePolicy,
@@ -46,6 +46,7 @@ class ReasoningBubble(QFrame):
         self._output_tokens = 0
         self._reasoning_tokens = 0
         self._displayed_tokens = 0  # 当前显示的 token 数字（用于动画插值）
+        self._token_anim: Optional[QPropertyAnimation] = None
         self._token_bridge: Optional[QObject] = None
         self.setStyleSheet("background:transparent;")
 
@@ -443,7 +444,6 @@ class ReasoningBubble(QFrame):
         return "gear"
 
     def _rerender_tool_status(self):
-        from src.gui.style import STATUS_COLORS
         color_map = STATUS_COLORS
         prefix_map = {
             "coding": "[CODE] ",

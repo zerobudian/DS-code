@@ -461,7 +461,6 @@ class HookManager:
         for r in results:
             if r.error:
                 logger.debug("钩子 %s 执行错误: %s", r.hook_name, r.error)
-                continue
             if r.blocked:
                 blocked = True
                 reason = f"[{r.hook_name}] {r.context_injection or '被钩子阻断'}"
@@ -489,7 +488,7 @@ class HookManager:
 
     def _build_env(self, hook: Hook, **kwargs) -> Dict[str, str]:
         """构建钩子执行的环境变量"""
-        env = os.environ.copy()
+        env = {k: v for k, v in os.environ.items() if k != "DSCODE_SIDECAR_TOKEN"}
         env["DSCODE_HOOK_EVENT"] = hook.event
         env["DSCODE_HOOK_NAME"] = hook.name
         env["DSCODE_WORK_DIR"] = str(self.work_dir) if self.work_dir else ""

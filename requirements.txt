@@ -1,0 +1,4 @@
+openai>=1.58,<3
+httpx>=0.27,<1
+cryptography>=43,<48
+platformdirs>=4,<5

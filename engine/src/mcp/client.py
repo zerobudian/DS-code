@@ -116,6 +116,9 @@ class MCPClient:
         self._available_tools: List[Dict[str, Any]] = []
         self._lock: Any = None                    # asyncio.Lock，在持久化 loop 中创建
         self._running = False
+        self._connection_task = None
+        self._start_future = None
+        self._stop_requested = None
 
         # 持久化 event loop（后台线程）
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -292,113 +295,68 @@ class MCPClient:
 
     # --------------------- 异步实现 ---------------------
     async def start_async(self) -> Dict[str, Any]:
-        """异步启动 MCP 服务器，完成 MCP handshake (initialize)，返回服务器信息。
-
-        返回:
-            {"server_name": str, "version": str, "capabilities": {...}, "ok": True}
-            失败时返回 {"ok": False, "error": str}
-        """
         if self._running:
-            return {"ok": True, **self._server_info}
-
-        if not _MCP_AVAILABLE:
-            return {
-                "ok": False,
-                "error": "MCP Python SDK 未安装 (pip install mcp>=1.27)，无法启动 MCP 服务器",
-                "server_name": self.server_name,
-            }
-
-        # 在持久化 loop 中创建锁（确保绑定到当前运行中的 loop）
-        with self._lock_lock:
-            if self._lock is None:
-                self._lock = asyncio.Lock()
-
-        try:
-            server_params = StdioServerParameters(
-                command=self.command,
-                args=list(self.args),
-                env=dict(self.env) if self.env else None,
-                cwd=self.working_dir,
-            )
-            # 直接手动 enter，以获取可跨多次调用存活的 read/write stream
-            cm = stdio_client(server_params)
-            read_stream, write_stream = await cm.__aenter__()
-            self._cm_exit_stack = cm
-
-            session = ClientSession(read_stream, write_stream)
-            init_result = await session.initialize()
-
-            self._session = session
-            self._running = True
-
-            # 解析 server_info
-            try:
-                info_dict = (
-                    init_result.serverInfo.model_dump()
-                    if hasattr(init_result, "serverInfo") and init_result.serverInfo
-                    else {}
-                )
-            except Exception:
-                info_dict = {}
-
-            try:
-                caps = (
-                    init_result.capabilities.model_dump()
-                    if hasattr(init_result, "capabilities") and init_result.capabilities
-                    else {}
-                )
-            except Exception:
-                caps = {}
-
-            self._server_info = {
-                "ok": True,
-                "server_name": info_dict.get("name", self.server_name),
-                "version": info_dict.get("version", ""),
-                "capabilities": caps,
-            }
-
-            # 初始化后立即拿一次工具列表
-            try:
-                self._available_tools = await self._list_tools_async_locked()
-            except Exception as exc:  # pragma: no cover - 仅记录
-                logger.warning("list_tools 初始化失败: %s", exc)
-
             return dict(self._server_info)
-
-        except Exception as exc:
-            logger.exception("MCP 服务器 %s 启动失败", self.server_name)
-            # 尝试清理
-            try:
-                if self._cm_exit_stack is not None:
-                    await self._cm_exit_stack.__aexit__(type(exc), exc, None)
-            except Exception as _exc:
-                logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-            self._cm_exit_stack = None
-            self._session = None
-            self._running = False
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-
-    async def stop_async(self) -> None:
-        """优雅关闭会话与子进程。"""
-        if not self._running:
-            return
-        self._running = False
+        if not _MCP_AVAILABLE:
+            return {"ok": False, "error": "MCP Python SDK 未安装 (pip install mcp)",
+                    "server_name": self.server_name}
+        if self._connection_task is None or self._connection_task.done():
+            self._lock = asyncio.Lock()
+            self._stop_requested = asyncio.Event()
+            self._start_future = asyncio.get_running_loop().create_future()
+            self._connection_task = asyncio.create_task(self._connection_owner(self._start_future))
         try:
-            # 通知服务端结束会话 (可选)
-            if self._session is not None and hasattr(self._session, "close"):
-                try:
-                    await asyncio.wait_for(self._session.close(), timeout=1.0)
-                except Exception as _exc:
-                    logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
+            return await asyncio.shield(self._start_future)
+        except asyncio.CancelledError:
+            await self.stop_async()
+            raise
+
+    async def _connection_owner(self, ready):
+        """Enter and exit both SDK context managers in the same owning task."""
+        try:
+            params = StdioServerParameters(command=self.command, args=list(self.args),
+                                           env=dict(self.env) if self.env else None,
+                                           cwd=self.working_dir)
+            async with stdio_client(params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    self._session = session
+                    initialized = await session.initialize()
+                    self._server_info = {"ok": True,
+                        "server_name": initialized.serverInfo.name,
+                        "version": initialized.serverInfo.version,
+                        "capabilities": initialized.capabilities.model_dump()}
+                    self._available_tools = await self._list_tools_async_locked()
+                    self._running = True
+                    if not ready.done():
+                        ready.set_result(dict(self._server_info))
+                    await self._stop_requested.wait()
+        except asyncio.CancelledError:
+            if not ready.done():
+                ready.set_result({"ok": False, "error": "MCP 启动已取消"})
+            raise
+        except Exception as exc:
+            logger.warning("MCP 服务器 %s 连接失败: %s", self.server_name, exc)
+            if not ready.done():
+                ready.set_result({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
         finally:
-            if self._cm_exit_stack is not None:
-                try:
-                    await self._cm_exit_stack.__aexit__(None, None, None)
-                except Exception as _exc:
-                    logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-                self._cm_exit_stack = None
+            self._running = False
             self._session = None
             self._available_tools = []
+
+    async def stop_async(self) -> None:
+        if self._stop_requested is not None:
+            self._stop_requested.set()
+        task = self._connection_task
+        if task is not None and task is not asyncio.current_task():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=3)
+            except asyncio.TimeoutError:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            except asyncio.CancelledError:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self._connection_task = self._start_future = self._stop_requested = None
 
     async def _list_tools_async_locked(self) -> List[Dict[str, Any]]:
         """已持有锁的内部 list_tools 实现。"""
@@ -541,7 +499,7 @@ class MCPClient:
     def stop(self) -> None:
         """同步停止。"""
         with self._thread_lock:
-            if not self._running:
+            if self._loop is None:
                 return
             try:
                 self._run_on_loop(self.stop_async(), timeout=5.0)

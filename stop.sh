@@ -1,7 +1,15 @@
-#!/bin/bash
-# DScode V2 — 一键停止
-SIDECAR_PORT=8765
-echo "🛑 正在停止 DScode..."
-lsof -ti:$SIDECAR_PORT 2>/dev/null | xargs kill -9 2>/dev/null && echo "✅ Sidecar 已停止" || echo "ℹ️  Sidecar 未运行"
-pkill -f "npx electron" 2>/dev/null && echo "✅ Electron 已关闭" || echo "ℹ️  Electron 未运行"
-echo "👋 已退出"
+#!/usr/bin/env bash
+set -euo pipefail
+# Stop only an explicitly selected DS Code process. Closing its window also
+# triggers graceful Sidecar cleanup; never kill arbitrary port owners.
+if [[ $# -ne 1 || ! "$1" =~ ^[0-9]+$ || "$1" -le 1 ]]; then
+  echo '用法: ./stop.sh <DS Code Electron PID>；也可以关闭 DS Code 窗口。' >&2
+  exit 2
+fi
+DSCODE_COMMAND="$(ps -p "$1" -o args=)"
+DSCODE_ROOT="$(cd "$(dirname "$0")" && pwd)"
+if [[ "$DSCODE_COMMAND" != *"$DSCODE_ROOT/node_modules/electron/dist/"* ]]; then
+  echo '所选 PID 不是当前 DS Code 安装的 Electron 进程。' >&2
+  exit 1
+fi
+kill -TERM "$1"

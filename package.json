@@ -6,12 +6,13 @@
   "scripts": {
     "start": "electron .",
     "sidecar": "python3 sidecar/sidecar.py",
-    "dev": "concurrently \"npm run sidecar\" \"npm start\""
+    "dev": "electron . --dev",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
-    "electron": "^33.0.0"
+    "electron": "33.4.11"
   },
   "devDependencies": {
-    "concurrently": "^9.0.0"
+    "playwright": "1.64.0"
   }
 }

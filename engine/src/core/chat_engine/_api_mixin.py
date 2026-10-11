@@ -2,7 +2,18 @@
 """APIStreamingMixin — 模型调用与流式响应处理（拆分自 chat_engine.py）。"""
 from __future__ import annotations
 
-from src.core.chat_engine._imports import *  # noqa: F401, F403
+from src.core.chat_engine._imports import (
+    APIError,
+    Dict,
+    List,
+    Optional,
+    get_global_rate_limiter,
+    time,
+)
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -43,33 +54,10 @@ class APIStreamingMixin(object):
         除 APIError 外，也会捕获连接/超时/网络等可重试异常，避免底层网络抖
         动直接中断深度模式循环。重试次数与退避上限由类常量控制（C-001）。
         """
-        last_error: Optional[APIError] = None
-        for attempt in range(1, self._MAX_MODEL_RETRIES + 1):
-            try:
-                return self._stream_chat(api_messages)
-            except APIError as e:
-                last_error = e
-                if 400 <= e.code < 500 and e.code != 429:
-                    raise
-                if not self._should_retry_step(e):
-                    raise
-            except Exception as e:
-                # 非 APIError（如 ConnectionError / TimeoutError）按关键字判断是否可重试
-                if not self._should_retry_step(e):
-                    raise
-                last_error = APIError(0, str(e))
-
-            if attempt >= self._MAX_MODEL_RETRIES:
-                break
-            delay = self._retry_delay(attempt)
-            logger.warning(
-                "_call_model 失败 (code=%s) 第 %s 次尝试，%ss 后重试",
-                last_error.code if last_error else 0, attempt, delay,
-            )
-            time.sleep(delay)
-        if last_error is not None:
-            raise last_error
-        raise APIError(500, "_call_model 重试耗尽")
+        if self._is_stopped():
+            raise APIError(499, "请求已被用户取消", need_retry=False)
+        # DeepSeekAPI owns transport retries. Never replay a partially delivered stream here.
+        return self._stream_chat(api_messages)
 
     def _stream_chat(self, api_messages: List[Dict]) -> Dict:
         """调用 DeepSeek API，流式输出 content / reasoning，返回 usage。"""

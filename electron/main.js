@@ -1,133 +1,72 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
-const { spawn } = require('child_process');
-const path = require('path');
-const net = require('net');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const path = require('node:path');
+const fs = require('node:fs');
+const { randomBytes } = require('node:crypto');
+const { SidecarProcess } = require('./sidecar-process');
 
-const SIDECAR_PORT = 8765;
-let sidecarProcess = null;
+const root = path.join(__dirname, '..');
+const localPython = path.join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+const port = Number(process.env.DSCODE_SIDECAR_PORT || 8765);
+const token = randomBytes(32).toString('hex');
+const sidecar = new SidecarProcess({
+  python: process.env.DSCODE_PYTHON || (fs.existsSync(localPython) ? localPython : 'python3'),
+  script: path.join(root, 'sidecar', 'sidecar.py'), cwd: root, port, token,
+});
 let mainWindow = null;
+let canQuit = false;
 
-// ── Python Sidecar 生命周期管理 ──────────────────────
-function startSidecar() {
-  // 先杀掉所有占用 SIDECAR_PORT 的旧进程
+function openExternal(url) {
   try {
-    const { execSync } = require('child_process');
-    execSync(`lsof -ti:${SIDECAR_PORT} | xargs kill -9 2>/dev/null || true`, { timeout: 3000 });
+    const parsed = new URL(url);
+    if (['http:', 'https:'].includes(parsed.protocol)) shell.openExternal(url);
   } catch {}
-
-  console.log('[Electron] Starting Python sidecar...');
-  const sidecarPath = path.join(__dirname, '..', 'sidecar', 'sidecar.py');
-  const cwd = path.join(__dirname, '..');
-
-  sidecarProcess = spawn('python3', [sidecarPath, '--port', String(SIDECAR_PORT)], {
-    cwd: cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-
-  sidecarProcess.stdout.on('data', (data) => {
-    console.log(`[sidecar] ${data.toString().trim()}`);
-  });
-
-  sidecarProcess.stderr.on('data', (data) => {
-    console.error(`[sidecar:err] ${data.toString().trim()}`);
-  });
-
-  sidecarProcess.on('close', (code) => {
-    console.log(`[Electron] Sidecar exited (code=${code})`);
-    sidecarProcess = null;
-  });
 }
 
-function stopSidecar() {
-  if (sidecarProcess) {
-    console.log('[Electron] Stopping sidecar...');
-    sidecarProcess.kill('SIGTERM');
-    setTimeout(() => {
-      if (sidecarProcess) {
-        sidecarProcess.kill('SIGKILL');
-      }
-    }, 3000);
-  }
-}
-
-function waitForSidecar(retries = 30) {
-  return new Promise((resolve, reject) => {
-    const check = () => {
-      const socket = new net.Socket();
-      socket.setTimeout(500);
-      socket.connect(SIDECAR_PORT, '127.0.0.1', () => {
-        socket.destroy();
-        resolve();
-      });
-      socket.on('error', () => {
-        socket.destroy();
-        if (retries-- > 0) {
-          setTimeout(check, 500);
-        } else {
-          reject(new Error('Sidecar 启动超时'));
-        }
-      });
-    };
-    check();
-  });
-}
-
-// ── 主窗口 ─────────────────────────────────────────
-async function createWindow() {
+function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 900,
-    minHeight: 600,
-    title: 'DS Code',
-    backgroundColor: '#F8F9FB',
+    width: 1280, height: 860, minWidth: 900, minHeight: 600,
+    title: 'DS Code', backgroundColor: '#F8F9FB',
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
+      nodeIntegration: false, contextIsolation: true, sandbox: true,
+      preload: path.join(__dirname, 'preload.js'),
     },
   });
-
-  // 等待 sidecar 就绪
-  try {
-    await waitForSidecar();
-    console.log('[Electron] Sidecar ready, loading UI...');
-  } catch (e) {
-    console.error('[Electron] Sidecar did not start:', e.message);
-  }
-
-  // 加载前端
-  mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
-
-  // DevTools（开发模式）
-  if (process.argv.includes('--dev')) {
-    mainWindow.webContents.openDevTools();
-  }
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    openExternal(url);
+    return { action: 'deny' };
   });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    event.preventDefault(); openExternal(url);
+  });
+  mainWindow.loadFile(path.join(root, 'renderer', 'index.html'));
+  if (process.argv.includes('--dev')) mainWindow.webContents.openDevTools();
+  mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-// ── IPC handlers ───────────────────────────────────
-ipcMain.handle('get-sidecar-url', () => {
-  return `http://127.0.0.1:${SIDECAR_PORT}`;
+ipcMain.handle('get-sidecar-config', event => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error('Unknown renderer');
+  return { url: sidecar.url, token };
 });
 
-// ── App 生命周期 ───────────────────────────────────
-app.whenReady().then(async () => {
-  await createWindow();
-});
-
-app.on('before-quit', () => {
-  stopSidecar();
-});
-
-app.on('window-all-closed', () => {
+if (!app.requestSingleInstanceLock()) {
   app.quit();
-});
-
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
-});
+} else {
+  app.on('second-instance', () => { mainWindow?.show(); mainWindow?.focus(); });
+  app.whenReady().then(async () => {
+    try {
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid DSCODE_SIDECAR_PORT');
+      await sidecar.start();
+      createWindow();
+    } catch (error) {
+      dialog.showErrorBox('DS Code 启动失败', error.message);
+      app.quit();
+    }
+  });
+  app.on('activate', () => { if (!mainWindow && sidecar.child) createWindow(); });
+  app.on('window-all-closed', () => app.quit());
+  app.on('before-quit', event => {
+    if (canQuit) return;
+    event.preventDefault();
+    sidecar.stop().finally(() => { canQuit = true; app.quit(); });
+  });
+}
