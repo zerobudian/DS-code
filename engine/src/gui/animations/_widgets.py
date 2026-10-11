@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 from PySide6.QtCore import (
-    QPropertyAnimation, QEasingCurve, QTimer, Property, Qt, Signal,
+    QPropertyAnimation, QEasingCurve, QTimer, Property, Qt, Signal, QEvent,
 )
 from PySide6.QtWidgets import (
     QWidget, QPushButton, QFrame,

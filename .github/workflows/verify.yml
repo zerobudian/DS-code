@@ -1,0 +1,30 @@
+name: Verify
+on:
+  push:
+  pull_request:
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: python -m pip install -r requirements.lock ruff==0.17.0
+      - run: npm ci --ignore-scripts
+      - run: PYTHONPATH=engine python -m unittest discover -s tests -v
+      - run: npm test
+      - run: python -m ruff check --select F821,F822,F823,E9 engine sidecar tests
+      - run: python -m compileall -q engine sidecar
+      - run: node --check renderer/js/app.js && node --check electron/main.js && bash -n start.sh stop.sh
+      - run: node node_modules/electron/install.js
+      - run: xvfb-run -a python tests/electron_smoke.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-smoke
+          path: test-results/

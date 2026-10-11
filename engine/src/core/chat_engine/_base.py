@@ -44,6 +44,7 @@ class ChatEngineBase(object):
         # L-014: 防止发送按钮重复提交，确保同一时刻只有一个 send_message 在执行
         self._send_lock = threading.Lock()
         self._send_in_progress: bool = False
+        self._active_cancel_event = None
         # 受 _state_lock 保护的标志统一放在 _state dict，避免分散的 torn read。
         # 使用 Dict[str, Any] 因为内部存储多种类型（bool/str/float/list/None），
         # 所有读取都通过 _state_cost / _state_int 等带类型转换的辅助方法完成。
@@ -74,7 +75,7 @@ class ChatEngineBase(object):
         self._subagent: Optional[_SubAgentEngineLike] = None  # 子代理引擎（懒加载，set_project 中初始化）
         # 用户可能显式发送 "/plan" "/undo" 等命令 — 由本类拦截处理
         self._COMMANDS = {"/clear", "/reset", "/undo", "/snapshot", "/restore",
-                          "/snapshots", "/plan", "/ultra", "/help", "/hook", "/lsp"}
+                          "/snapshots", "/plan", "/ultra", "/normal", "/help", "/hook", "/lsp"}
 
         # ========== 回调接口 (GUI 或 CLI 自行设置) ==========
         self.on_status_update: Optional[Callable[[str], None]] = None
@@ -193,7 +194,29 @@ class ChatEngineBase(object):
     def _is_stopped(self) -> bool:
         """读取停止标志 — 线程安全（一次加锁读取避免 torn read）"""
         with self._state_lock:
-            return bool(self._state.get("stop_requested")) or bool(self._state.get("stop"))
+            return (bool(self._state.get("stop_requested")) or bool(self._state.get("stop"))
+                    or (self._active_cancel_event is not None and self._active_cancel_event.is_set()))
+
+    def cancel_pending_confirmations(self):
+        self._gate.cancel_all()
+
+    def get_pending_plan(self):
+        with self._state_lock:
+            return self._state.get("pending_plan")
+
+    def shutdown(self):
+        """Release background services and transports when the host exits."""
+        self.stop()
+        self._fs_monitor.stop()
+        resources = ((self.mcp_manager, "stop_all"), (self.lsp_manager, "shutdown_all"),
+                     (self._subagent, "stop_all"), (self._subagent, "stop_watchdog"))
+        for manager, method in resources:
+            if manager is not None and hasattr(manager, method):
+                try:
+                    getattr(manager, method)()
+                except Exception:
+                    logger.exception("关闭后台服务失败: %s", method)
+        self.api.close()
 
     def _get_model(self) -> str:
         """获取当前生效的模型名称。
@@ -319,7 +342,7 @@ class ChatEngineBase(object):
             logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
 
     # ========== 项目切换 ==========
-    def set_project(self, sandbox: ProjectSandbox):
+    def set_project(self, sandbox: Optional[ProjectSandbox]):
         """设置当前项目"""
         # P1-9 修复: 切换项目前完整清理旧资源，防止MCP/子代理/文件监视器泄漏
         # stop() 已负责归档旧会话（mark_stopped + save_checkpoint + archive + 停止checkpoint线程）
@@ -368,6 +391,13 @@ class ChatEngineBase(object):
             logger.debug("set_project 清理旧 subagent 异常", exc_info=True)
 
         self.sandbox = sandbox
+        if sandbox is None:
+            self._fs_monitor.stop()
+            self.history = self.tool_exec = None
+            self.mcp_manager = self.lsp_manager = self._subagent = None
+            self.memory_manager = self.auto_memory = self.long_term_memory = None
+            self.sklii_manager = self.image_doc_manager = self.hook_manager = self.skill_manager = None
+            return
         self.history = ConversationHistory(sandbox.history_dir)
 
         # MCP 管理器 (懒加载)
@@ -782,7 +812,7 @@ class ChatEngineBase(object):
         return self._send_in_progress
 
     def send_message(self, user_text: str, uploaded_files: Optional[List[str]] = None,
-                     images: Optional[List[str]] = None):
+                     images: Optional[List[str]] = None, cancel_event=None):
         """发送用户消息入口。防止按钮重复提交，若已有请求在处理中则直接拒绝。"""
         if not self._send_lock.acquire(blocking=False):
             logger.warning("拒绝重复发送：已有请求正在处理中")
@@ -791,8 +821,12 @@ class ChatEngineBase(object):
             return
         self._send_in_progress = True
         try:
+            self._active_cancel_event = cancel_event
+            if cancel_event is not None and cancel_event.is_set():
+                return
             return self._send_message_impl(user_text, uploaded_files, images)
         finally:
+            self._active_cancel_event = None
             self._send_in_progress = False
             self._send_lock.release()
 

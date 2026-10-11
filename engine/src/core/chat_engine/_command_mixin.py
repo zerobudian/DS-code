@@ -93,6 +93,7 @@ class SlashCommandMixin(object):
             "/snapshots": self._cmd_snapshots,
             "/plan": self._cmd_plan,
             "/ultra": self._cmd_ultra,
+            "/normal": self._cmd_normal,
             "/help": self._cmd_help,
             "/hook": self._cmd_hook,
             "/lsp": self._cmd_lsp,
@@ -108,6 +109,8 @@ class SlashCommandMixin(object):
         """处理 /clear 与 /reset：清空聊天（保留项目状态）。"""
         if self.on_chat_clear_requested:
             self.on_chat_clear_requested()
+        if self.history is not None:
+            self.history.clear()
         if self.on_finished:
             self.on_finished(0.0, 0.0, 0, 0)
         return True
@@ -207,15 +210,22 @@ class SlashCommandMixin(object):
     def _cmd_plan(self, args: list) -> bool:
         """处理 /plan：强制进入 planning 模式并产生计划。"""
         # 强制进入 planning 模式并产生计划
-        with self._state_lock:
-            self._state["phase"] = "planning"
-            self._state["plan_confirmed"] = False
+        self.set_mode("plan")
+        self.cfg.set("chat_mode", "plan")
         return False  # 让 send_message 走正常流程（会在 planning 模式下产计划）
 
     def _cmd_ultra(self, args: list) -> bool:
         """处理 /ultra：切换到 Ultra 模式（规划验证交付闭环）。"""
         self.set_mode("ultra")
+        self.cfg.set("chat_mode", "ultra")
         return False  # 让消息走正常流程（会在 ultra 模式下走 _run_ultra_loop）
+
+    def _cmd_normal(self, args: list) -> bool:
+        self.set_mode("normal")
+        self.cfg.set("chat_mode", "normal")
+        if self.on_finished:
+            self.on_finished(0.0, 0.0, 0, 0)
+        return True
 
     def _cmd_help(self, args: list) -> bool:
         """处理 /help：显示可用命令列表。"""

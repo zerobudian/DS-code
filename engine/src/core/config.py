@@ -7,6 +7,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 import io
+import copy
 import json
 import os
 import platform
@@ -904,6 +905,26 @@ class Config:
             print(f"[Config] update 写入失败（将仅保留在内存）: {e}")
         except Exception as e:
             print(f"[Config] update 失败: {e}")
+
+    def update_settings(self, values: Dict[str, Any]) -> None:
+        """Persist a validated UI batch once, synchronizing active provider fields."""
+        with self._instance_lock:
+            previous = copy.deepcopy(self.data)
+            try:
+                self.data.update(copy.deepcopy(values))
+                if "nickname" in values:
+                    self.data["username"] = values["nickname"]
+                providers = self.data.get("providers", [])
+                if providers:
+                    index = self.active_provider_index
+                    provider = providers[index if 0 <= index < len(providers) else 0]
+                    for key in ("model", "base_url", "api_key"):
+                        if key in values:
+                            provider[key] = values[key]
+                self._save()
+            except Exception:
+                self.data = previous
+                raise
 
     def get_api_key(self) -> str:
         """获取 API Key（内部解密）。线程安全。"""

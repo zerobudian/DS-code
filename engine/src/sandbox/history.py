@@ -16,6 +16,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 import json
+import copy
 import os
 import shutil
 import tempfile
@@ -327,6 +328,11 @@ class ConversationHistory:
             print(f"[History] add_tool_result 落盘失败: {e}")
         return msg
 
+    def snapshot(self) -> List[Dict]:
+        """Return a detached snapshot for UI/API consumers."""
+        with self._lock:
+            return copy.deepcopy(self.messages)
+
     def clear(self):
         """清空当前会话, 新建一个 session 文件（线程安全）。
         P1-3 修复: 在锁内设置 _dirty=True 并递增版本号，确保空列表被保存。
@@ -355,26 +361,23 @@ class ConversationHistory:
         - system prompt
         - user: 完整原文
         - assistant: 完整 content (reasoning 不放入 content 以确保缓存命中)
-        - tool: 完整结果, 以 role=user 形式包装 (因为 deepseek 原生不支持 tool role)
+        - tool: 原生调用使用 role=tool，旧文本调用使用 role=user 包装
 
         参数:
             language: 界面语言，用于工具结果包装前缀（B-15）。
         """
         # 对 messages 做一次锁内快照，避免遍历期间被并发修改
-        with self._lock:
-            if not isinstance(self.messages, list):
-                self.messages = []
-            snapshot = list(self.messages)
+        snapshot = self.snapshot()
 
-        messages = [{"role": "system", "content": system_prompt, "id": "msg_sys"}]
-        for i, m in enumerate(snapshot, 1):
+        messages = [{"role": "system", "content": system_prompt}]
+        for m in snapshot:
             role = m.get("role", "user")
             content = m.get("content", "")
             if role == "tool":
                 tc_id = m.get("tool_call_id", "")
                 if tc_id:
                     # 原生 function calling: 使用标准 role=tool + tool_call_id
-                    messages.append({"role": "tool", "tool_call_id": tc_id, "content": content, "id": f"msg_{i}"})
+                    messages.append({"role": "tool", "tool_call_id": tc_id, "content": content})
                 else:
                     # 文本提取或子代理: 回退到 role=user 包装
                     name = m.get("name", "tool")
@@ -382,19 +385,30 @@ class ConversationHistory:
                         wrapper = f"[Tool Result - {name}]\n{content}"
                     else:
                         wrapper = f"[工具调用结果 - {name}]\n{content}"
-                    messages.append({"role": "user", "content": wrapper, "id": f"msg_{i}"})
+                    messages.append({"role": "user", "content": wrapper})
             elif role == "assistant":
-                msg = {"role": "assistant", "content": content, "id": f"msg_{i}"}
+                msg = {"role": "assistant", "content": content}
                 # DeepSeek V4 要求工具调用后的轮次必须回传 reasoning_content
                 rc = m.get("reasoning_content", "")
-                tc = m.get("tool_calls")
-                if rc:
+                tc = []
+                for call in m.get("tool_calls") or []:
+                    if not isinstance(call, dict):
+                        continue
+                    fn = call.get("function")
+                    if not isinstance(fn, dict) or not fn.get("name") or not call.get("id"):
+                        continue
+                    arguments = fn.get("arguments", "{}")
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments, ensure_ascii=False)
+                    tc.append({"id": call["id"], "type": "function",
+                               "function": {"name": fn["name"], "arguments": arguments}})
+                if rc or tc:
                     msg["reasoning_content"] = rc
                 if tc:
                     msg["tool_calls"] = tc
                 messages.append(msg)
             elif role == "user":
-                messages.append({"role": "user", "content": content, "id": f"msg_{i}"})
+                messages.append({"role": "user", "content": content})
         return messages
 
     # ---------- 上下文摘要 (仅给新代理启动用) ----------

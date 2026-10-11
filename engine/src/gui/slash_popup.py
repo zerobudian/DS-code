@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from typing import List, Optional, Tuple
+from src.gui.animations._helpers import _stop_existing_anim
 
 from PySide6.QtCore import (
     Property,

@@ -15,8 +15,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 import json
+import os
 import re
 import socket
+import ssl
 import threading
 import time
 from contextlib import contextmanager
@@ -106,6 +108,8 @@ class DeepSeekAPI:
 
         当 certifi 不可用时显式记录 warning，而不是静默 fallback 到系统默认 CA（M-004）。
         """
+        if os.environ.get("SSL_CERT_FILE"):
+            return os.environ["SSL_CERT_FILE"]
         if certifi is not None:
             return certifi.where()
         logger.warning(
@@ -135,13 +139,17 @@ class DeepSeekAPI:
                 self._http_session = None
             if httpx is None:
                 return None
-            timeout = self._make_httpx_timeout()
-            self._http_session = httpx.Client(
-                verify=self._get_ssl_verify(),
-                timeout=timeout,
-            )
+            self._http_session = self._make_http_client()
             self._http_session_key = key
             return self._http_session
+
+    def _make_http_client(self):
+        if httpx is None:
+            return None
+        verify = self._get_ssl_verify()
+        if isinstance(verify, str):
+            verify = ssl.create_default_context(cafile=verify)
+        return httpx.Client(verify=verify, timeout=self._make_httpx_timeout())
 
     def _get_client(self) -> Optional["OpenAI"]:
         _ensure_openai()
@@ -157,7 +165,9 @@ class DeepSeekAPI:
             # 使用 httpx.Timeout 设置连接/读取超时，避免弱网/服务端无响应时永久阻塞
             timeout = self._make_httpx_timeout()
             # 显式传入 http_client 并强制开启 SSL 证书验证（CWE-295 / MEDIUM-001）
-            http_client = self._get_http_session()
+            # Each OpenAI client owns its transport. Closing an old client must
+            # never close the diagnostics session or its replacement client.
+            http_client = self._make_http_client()
             old_client = self._client
             self._client = OpenAI(
                 api_key=key, base_url=base_url,
@@ -301,9 +311,7 @@ class DeepSeekAPI:
                             data = resp.json()
                         except (ValueError, json.JSONDecodeError):
                             return {"available_balance": 0, "ok": False, "error": "bad_json"}
-                        avail = float(data.get("available_balance", 0) or 0)
-                        total = float(data.get("total_balance", 0) or 0)
-                        return {"available_balance": avail, "total_balance": total, "ok": True}
+                        return self._normalize_balance(data)
                     return {
                         "available_balance": 0, "ok": False,
                         "code": resp.status_code,
@@ -334,9 +342,7 @@ class DeepSeekAPI:
                     data = resp.json()
                 except (ValueError, json.JSONDecodeError):
                     return {"available_balance": 0, "ok": False, "error": "bad_json"}
-                avail = float(data.get("available_balance", 0) or 0)
-                total = float(data.get("total_balance", 0) or 0)
-                return {"available_balance": avail, "total_balance": total, "ok": True}
+                return self._normalize_balance(data)
             return {
                 "available_balance": 0, "ok": False,
                 "code": resp.status_code,
@@ -350,6 +356,39 @@ class DeepSeekAPI:
                     resp.close()
                 except Exception as _exc:
                     logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
+
+    @staticmethod
+    def _normalize_balance(data: Dict) -> Dict:
+        infos = data.get("balance_infos", [])
+        if infos:
+            selected = next((i for i in infos if i.get("currency") == "CNY"), infos[0])
+            total = float(selected.get("total_balance", 0) or 0)
+            return {"available_balance": total, "total_balance": total, "ok": True,
+                    "currency": selected.get("currency", ""), "balance_infos": infos,
+                    "is_available": bool(data.get("is_available", False))}
+        return {"available_balance": float(data.get("available_balance", 0) or 0),
+                "total_balance": float(data.get("total_balance", 0) or 0), "ok": True,
+                "currency": data.get("currency", "CNY")}
+
+    def list_models(self) -> Dict:
+        """Fetch models using the configured URL, port, path and TLS policy."""
+        if not self.cfg.api_key:
+            return {"ok": False, "models": [], "error": "未配置 API Key"}
+        try:
+            session = self._get_http_session()
+            if session is None:
+                return {"ok": False, "models": [], "error": "请安装 requirements.txt 中的依赖"}
+            resp = session.get(f"{self._base_url()}/models",
+                               headers={"Authorization": f"Bearer {self.cfg.api_key}"})
+            try:
+                resp.raise_for_status()
+                return {"ok": True, "models": [
+                    {"id": m["id"], "name": m["id"], "label": m["id"]}
+                    for m in resp.json().get("data", []) if m.get("id")]}
+            finally:
+                resp.close()
+        except Exception as exc:
+            return {"ok": False, "models": [], "error": self._sanitize_error_message(str(exc))}
 
     def _balance_error_response(self, e) -> Dict:
         """统一余额查询异常返回格式（detail 经过脱敏，避免泄漏 API Key）。"""
@@ -548,14 +587,13 @@ class DeepSeekAPI:
                 # usage chunk: choices 为空
                 if hasattr(chunk, "usage") and chunk.usage:
                     u = chunk.usage
-                    usage_summary = {
+                    usage_summary.update({
                         "prompt_tokens": getattr(u, "prompt_tokens", 0),
                         "completion_tokens": getattr(u, "completion_tokens", 0),
                         "total_tokens": getattr(u, "total_tokens", 0),
                         "prompt_cache_hit_tokens": getattr(u, "prompt_cache_hit_tokens", 0) or 0,
                         "prompt_cache_miss_tokens": getattr(u, "prompt_cache_miss_tokens", 0) or 0,
-                    }
-                    continue
+                    })
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -575,6 +613,10 @@ class DeepSeekAPI:
                         existing = [t for t in usage_summary["tool_calls"] if t.get("index") == idx]
                         if existing:
                             existing[0]["function"]["arguments"] += fn_args
+                            if fn_name:
+                                existing[0]["function"]["name"] += fn_name
+                            if getattr(tc, "id", None):
+                                existing[0]["id"] = tc.id
                         else:
                             usage_summary["tool_calls"].append({
                                 "index": idx,
@@ -736,14 +778,13 @@ class DeepSeekAPI:
 
                 if hasattr(chunk, "usage") and chunk.usage:
                     u = chunk.usage
-                    usage_summary = {
+                    usage_summary.update({
                         "prompt_tokens": getattr(u, "prompt_tokens", 0),
                         "completion_tokens": getattr(u, "completion_tokens", 0),
                         "total_tokens": getattr(u, "total_tokens", 0),
                         "prompt_cache_hit_tokens": getattr(u, "prompt_cache_hit_tokens", 0) or 0,
                         "prompt_cache_miss_tokens": getattr(u, "prompt_cache_miss_tokens", 0) or 0,
-                    }
-                    continue
+                    })
 
                 if not chunk.choices:
                     continue

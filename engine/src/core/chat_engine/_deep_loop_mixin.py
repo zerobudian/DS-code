@@ -732,7 +732,7 @@ class DeepLoopMixin(object):
             self._state["plan_confirmed"] = False
             self._state["pending_plan"] = None
 
-    def continue_from_plan(self):
+    def continue_from_plan(self, cancel_event=None):
         """计划确认后继续执行；如果未实现或未确认，回落到标准 send_message。"""
         try:
             with self._state_lock:
@@ -759,7 +759,7 @@ class DeepLoopMixin(object):
             # 使用完 pending_plan 后清空，避免后续执行阶段被污染
             with self._state_lock:
                 self._state["pending_plan"] = None
-            self.send_message(prompt)
+            self.send_message(prompt, cancel_event=cancel_event)
         except Exception as e:
             try:
                 if self.on_error:

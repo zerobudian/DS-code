@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal, QTimer, QObject, QSize
+from PySide6.QtCore import Qt, Signal, QTimer, QObject, QSize, Property, QPropertyAnimation, QEasingCurve
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QPushButton, QSizePolicy,
