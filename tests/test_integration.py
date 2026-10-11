@@ -83,8 +83,8 @@ class IntegrationTests(unittest.TestCase):
         headers={'Authorization':'Bearer integration-token','Content-Type':'application/json'}
         conn.request(method,path,json.dumps(body) if body is not None else None,headers)
         r=conn.getresponse(); payload=json.loads(r.read()); code=r.status;conn.close();return code,payload
-    def stream(self,project,text):
-        status,run=self.api('POST','/api/chat/send',{'project':project,'text':text}); self.assertEqual(status,200,run)
+    def stream(self,project,text,attachments=None):
+        status,run=self.api('POST','/api/chat/send',{'project':project,'text':text,'attachments':attachments or []}); self.assertEqual(status,200,run)
         conn=http.client.HTTPConnection('127.0.0.1',self.port,timeout=15)
         conn.request('GET','/api/chat/stream?run_id='+run['run_id'],headers={'Authorization':'Bearer integration-token'})
         response=conn.getresponse(); self.assertEqual(response.status,200)
@@ -142,3 +142,21 @@ class IntegrationTests(unittest.TestCase):
     def test_methods_and_traversal_are_rejected(self):
         self.assertEqual(self.api('GET','/api/chat/send')[0],405)
         self.assertEqual(self.api('POST','/api/projects',{'name':'../escape'})[0],400)
+
+    def test_text_and_image_attachments_reach_real_sdk_requests(self):
+        import base64
+        before = len(Provider.requests)
+        text = base64.b64encode('附件内容进入模型'.encode()).decode()
+        status, note = self.api('POST','/api/projects/attachments/uploads',{'name':'note.txt','data':text})
+        self.assertEqual(status,200,note)
+        # A real, tiny PNG; the SDK transmits it as an image_url part.
+        png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yh9sAAAAASUVORK5CYII='
+        status, picture = self.api('POST','/api/projects/attachments/uploads',{'name':'pixel.png','data':png})
+        self.assertEqual(status,200,picture)
+        self.stream('attachments','analyze attachments',[note['name'],picture['name']])
+        request = Provider.requests[before]
+        parts = request['messages'][-1]['content']
+        self.assertTrue(any(p.get('type')=='image_url' and p['image_url']['url'].endswith(png) for p in parts))
+        self.assertTrue(any('附件内容进入模型' in p.get('text','') for p in parts))
+        self.assertNotIn('thinking',request)
+        self.assertNotIn('reasoning_effort',request)

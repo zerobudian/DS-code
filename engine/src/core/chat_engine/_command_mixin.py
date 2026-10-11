@@ -2,7 +2,15 @@
 """SlashCommandMixin — 斜杠命令解析与分发（拆分自 chat_engine.py）。"""
 from __future__ import annotations
 
-from src.core.chat_engine._imports import *  # noqa: F401, F403
+from src.core.chat_engine._imports import (
+    Optional,
+    Tuple,
+    time,
+)
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 

@@ -9,10 +9,27 @@ class SidecarService:
     def __init__(self, runtime):
         self.runtime = runtime
         self.cfg = runtime.cfg
+        from .project_data import ProjectDataService
+        self.project_data = ProjectDataService(runtime)
+        from .providers import ProviderService
+        self.providers = ProviderService(runtime, self.validate_config)
+
+    def custom_models(self):
+        """Normalize legacy model metadata without mutating saved configuration."""
+        raw = self.cfg.get("custom_models", [])
+        if not isinstance(raw, list):
+            return []
+        models = []
+        for item in raw[:2]:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip():
+                continue
+            context = item.get("context_1m", item.get("context1m", False))
+            models.append({"name": item["name"].strip(), "context_1m": context is True})
+        return models
 
     def config(self):
         cfg = self.cfg
-        custom = cfg.get("custom_models", [])
+        custom = self.custom_models()
         models = ([{"name": m["name"], "label": m["name"], "context_1m": m["context_1m"]}
                    for m in custom] if custom else cfg.get_available_models())
         return {
@@ -23,13 +40,15 @@ class SidecarService:
             "api_key_exists": bool(cfg.api_key), "onboarding_completed": cfg.get("onboarding_completed", False),
             "available_models": models, "custom_models": custom,
             "last_project": cfg.get("last_project", "demo"),
+            "provider_capabilities": cfg.get("provider_capabilities", {}),
+            "context_tokens": cfg.get("context_tokens", 128000),
         }
 
-    def update_config(self, body):
+    def validate_config(self, body):
         enums = {"reasoning_effort": {"high", "max"}, "permission_mode": {"reviewer", "coder", "full"},
                  "chat_mode": {"normal", "plan", "ultra"}, "language": {"zh", "en"},
                  "theme": {"light", "dark", "system"}}
-        allowed = set(enums) | {"model", "nickname", "base_url", "api_key", "onboarding_completed", "custom_models"}
+        allowed = set(enums) | {"model", "nickname", "base_url", "api_key", "onboarding_completed", "custom_models", "provider_capabilities", "context_tokens", "last_project"}
         if set(body) - allowed:
             raise HTTPError(400, "存在不支持的配置字段")
         values = {}
@@ -37,6 +56,17 @@ class SidecarService:
             if key in enums:
                 if not isinstance(value, str) or value not in enums[key]:
                     raise HTTPError(400, f"无效配置: {key}")
+            elif key == "provider_capabilities":
+                names = {"thinking", "reasoning_effort", "tools", "stream_usage", "vision"}
+                if not isinstance(value, dict) or set(value) - names or any(type(v) is not bool for v in value.values()):
+                    raise HTTPError(400, "无效供应商能力配置")
+            elif key == "context_tokens":
+                if type(value) is not int or not 1024 <= value <= 1048576:
+                    raise HTTPError(400, "context_tokens 必须在 1024 到 1048576 之间")
+            elif key == "last_project":
+                value = self.runtime.canonical(value)
+                if self.runtime.projects.get(value) is None:
+                    raise HTTPError(404, "项目不存在")
             elif key == "onboarding_completed":
                 if type(value) is not bool:
                     raise HTTPError(400, "onboarding_completed 必须是布尔值")
@@ -73,6 +103,10 @@ class SidecarService:
                         raise HTTPError(400, "无效 base_url 端口") from exc
                     value = value.rstrip("/")
             values[key] = value
+        return values
+
+    def update_config(self, body):
+        values = self.validate_config(body)
         with self.runtime.lock:
             if set(values) - {"language", "theme", "nickname"}:
                 self.runtime.require_idle()
@@ -111,6 +145,9 @@ class SidecarService:
                 if sb is None:
                     raise HTTPError(500, "创建项目失败")
                 return {"name": sb.name, "display_name": sb.get_display_name(), "ok": True}
+        if path.startswith("/api/projects/") and (request.method == "PUT" or any(
+                path.endswith("/" + suffix) for suffix in ("tasks", "files", "file", "uploads"))):
+            return self.project_data.route(request)
         if path.startswith("/api/projects/"):
             rest = path[len("/api/projects/"):]
             history = rest.endswith("/history")
@@ -133,13 +170,18 @@ class SidecarService:
                     rt.engine.set_project(None)
                 if not rt.projects.delete(name):
                     raise HTTPError(500, "删除项目失败")
-                return {"deleted": name}
+                if self.cfg.get("last_project") == name:
+                    remaining = rt.projects.list_projects()
+                    self.cfg.update_settings({"last_project": remaining[0] if remaining else "demo"})
+                return {"deleted": name, "last_project": self.cfg.get("last_project", "demo")}
+        if path == "/api/providers" or path.startswith("/api/providers/"):
+            return self.providers.route(request)
         if path == "/api/balance":
             self.require_method(request, "GET")
             return rt.engine.api.check_balance()
         if path == "/api/models":
             self.require_method(request, "GET")
-            custom = self.cfg.get("custom_models", [])
+            custom = self.custom_models()
             if custom:
                 return {"ok": True, "models": [{**m, "id": m["name"], "label": m["name"]} for m in custom]}
             return rt.engine.api.list_models()
@@ -149,7 +191,11 @@ class SidecarService:
             text = body.get("text")
             if not isinstance(text, str) or not text.strip():
                 raise HTTPError(400, "text 不能为空")
-            run = rt.start(body.get("project", "demo"), text)
+            attachments = body.get("attachments", [])
+            if (not isinstance(attachments, list) or len(attachments) > 8
+                    or any(not isinstance(n, str) or not n or len(n) > 180 for n in attachments)):
+                raise HTTPError(400, "附件列表无效")
+            run = rt.start(body.get("project", "demo"), text, attachments=attachments)
             return {"ok": True, "run_id": run.id, "project": run.project}
         if path == "/api/chat/stop":
             self.require_method(request, "POST")

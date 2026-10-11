@@ -13,7 +13,7 @@ from PySide6.QtGui import QPixmap, QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget, QFrame
 
 from src.gui.style import RADII, COLORS, _cached_style
-from src.gui.icon_factory import get_icon, draw_keyboard, draw_terminal, draw_paper
+from src.gui.icon_factory import get_icon
 from src.gui.animations import pop_in
 from src.gui.bubbles._helpers import _img, _try_pm
 

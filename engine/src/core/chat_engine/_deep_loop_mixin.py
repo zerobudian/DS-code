@@ -2,7 +2,19 @@
 """DeepLoopMixin — 深度循环（单轮/步骤/工具执行/计划阶段）核心循环（拆分自 chat_engine.py）。"""
 from __future__ import annotations
 
-from src.core.chat_engine._imports import *  # noqa: F401, F403
+from src.core.chat_engine._imports import (
+    APIError,
+    Dict,
+    List,
+    Optional,
+    TOOL_CALL_THRESHOLD,
+    Tuple,
+    json,
+)
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -228,7 +240,7 @@ class DeepLoopMixin(object):
                     except Exception as _exc:
                         logger.debug("on_tool_result 回调异常: %s", _exc, exc_info=True)
                 if self.history is not None:
-                    self.history.add_tool_result(name, user_answer, call.get("id", ""))
+                    self.history.add_tool_result(name, user_answer, call.get("id", ""), ok=True)
                 # 会话短时记忆：用户回答也应记录，保证链路一致
                 try:
                     if self.session_memory is not None:
@@ -243,7 +255,7 @@ class DeepLoopMixin(object):
                 except Exception as _exc:
                     logger.debug("on_tool_result 回调异常: %s", _exc, exc_info=True)
             if self.history is not None:
-                self.history.add_tool_result(name, result, call.get("id", ""))
+                self.history.add_tool_result(name, result, call.get("id", ""), ok=ok)
             # 会话短时记忆：记录工具调用摘要并立即 checkpoint
             try:
                 if self.session_memory is not None:
@@ -487,7 +499,7 @@ class DeepLoopMixin(object):
                     except Exception as _exc:
                         logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
                 if self.history is not None:
-                    self.history.add_tool_result(name, user_answer, call.get("id", ""))
+                    self.history.add_tool_result(name, user_answer, call.get("id", ""), ok=True)
                 continue
 
             if name == "exit_conversation":
@@ -505,7 +517,7 @@ class DeepLoopMixin(object):
                 except Exception as _exc:
                     logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
             if self.history is not None:
-                self.history.add_tool_result(name, result, call.get("id", ""))
+                self.history.add_tool_result(name, result, call.get("id", ""), ok=ok)
 
             # 会话短时记忆：记录深度模式工具结果并 checkpoint
             try:

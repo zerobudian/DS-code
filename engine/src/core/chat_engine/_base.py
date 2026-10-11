@@ -7,7 +7,44 @@
 """
 from __future__ import annotations
 
-from src.core.chat_engine._imports import *  # noqa: F401, F403
+from src.core.chat_engine._imports import (
+    APIError,
+    Any,
+    ArtifactManager,
+    Callable,
+    Config,
+    ConfirmationGate,
+    ConversationHistory,
+    DEFAULT_MAX_TURN_TIME,
+    DeepSeekAPI,
+    Dict,
+    FileSystemMonitor,
+    KunRuntime,
+    List,
+    Optional,
+    Path,
+    ProjectSandbox,
+    ToolExecutor,
+    _ImageDocumentManagerLike,
+    _MCPManagerLike,
+    _SklIIIManagerLike,
+    _SubAgentEngineLike,
+    json,
+    re,
+    threading,
+    time,
+)
+
+import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.core.auto_memory import AutoMemory
+    from src.core.long_term_memory import LongTermMemory
+    from src.core.session_memory import SessionMemory
+    from src.core.user_profile_memory import UserProfileMemory
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -23,6 +60,11 @@ class ChatEngineBase(object):
     _MAX_TOOL_RETRIES = 1
 
     def __init__(self):
+        self._balance_lock = threading.RLock()
+        self._balance_last_call = 0.0
+        self._balance_running = False
+        self._project_generation = 0
+        self._closed = False
         self.cfg = Config()
         self.api = DeepSeekAPI()
         # 核心依赖使用真实类型，便于 mypy 与 IDE 静态检查，避免 object 上的未知属性调用
@@ -206,6 +248,8 @@ class ChatEngineBase(object):
 
     def shutdown(self):
         """Release background services and transports when the host exits."""
+        self._closed = True
+        self._project_generation += 1
         self.stop()
         self._fs_monitor.stop()
         resources = ((self.mcp_manager, "stop_all"), (self.lsp_manager, "shutdown_all"),
@@ -216,6 +260,8 @@ class ChatEngineBase(object):
                     getattr(manager, method)()
                 except Exception:
                     logger.exception("关闭后台服务失败: %s", method)
+        if self.tool_exec is not None:
+            self.tool_exec.shutdown()
         self.api.close()
 
     def _get_model(self) -> str:
@@ -344,6 +390,8 @@ class ChatEngineBase(object):
     # ========== 项目切换 ==========
     def set_project(self, sandbox: Optional[ProjectSandbox]):
         """设置当前项目"""
+        self._project_generation += 1
+        self._code_vector_store = None
         # P1-9 修复: 切换项目前完整清理旧资源，防止MCP/子代理/文件监视器泄漏
         # stop() 已负责归档旧会话（mark_stopped + save_checkpoint + archive + 停止checkpoint线程）
         self.stop()
@@ -390,6 +438,8 @@ class ChatEngineBase(object):
         except Exception:
             logger.debug("set_project 清理旧 subagent 异常", exc_info=True)
 
+        if self.tool_exec is not None:
+            self.tool_exec.shutdown()
         self.sandbox = sandbox
         if sandbox is None:
             self._fs_monitor.stop()
@@ -702,20 +752,23 @@ class ChatEngineBase(object):
         work_dir = getattr(self.sandbox, "work_dir", None)
         if not work_dir:
             return
+        sandbox, generation = self.sandbox, self._project_generation
         # 代码向量索引初始化移至后台线程，避免 sentence-transformers/torch
         # 在 NumPy 不兼容环境下导入时 segfault 导致主进程崩溃。
         def _init_cv():
             try:
                 from src.analysis.code_vector_store import CodeVectorStore
                 store = CodeVectorStore(work_dir)
-                self._code_vector_store = store
-                self._update_code_index_status(store.status)
                 store.index(force=False)
+                if self._closed or self.sandbox is not sandbox or self._project_generation != generation:
+                    return
+                self._code_vector_store = store
                 self._update_code_index_status(store.status)
             except Exception as _exc:
                 logger.info("代码向量索引初始化失败: %s", _exc)
-                self._code_vector_store = None
-                self._update_code_index_status("unavailable")
+                if not self._closed and self.sandbox is sandbox and self._project_generation == generation:
+                    self._code_vector_store = None
+                    self._update_code_index_status("unavailable")
         self._update_code_index_status("initializing")
         threading.Thread(target=_init_cv, daemon=True, name="CodeVectorInit").start()
 

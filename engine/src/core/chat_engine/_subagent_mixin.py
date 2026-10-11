@@ -2,7 +2,9 @@
 """SubAgentMixin — 子代理工具接口（拆分自 chat_engine.py）。"""
 from __future__ import annotations
 
-from src.core.chat_engine._imports import *  # noqa: F401, F403
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 

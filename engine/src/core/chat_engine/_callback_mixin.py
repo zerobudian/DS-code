@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
-"""CallbackMixin — 工具/事件回调、状态栏与余额刷新、健康检查（拆分自 chat_engine.py）。
-
-注意：``_refresh_status_bar`` 使用 ``global _balance_*``，这些模块级变量由
-``_protocols`` 定义并在此导入；``global`` 语句绑定到本模块命名空间，所有读写
-均在本模块内完成，状态一致。
-"""
+"""Callbacks and instance-scoped status refresh for ChatEngine."""
 from __future__ import annotations
 
-from src.core.chat_engine._imports import *  # noqa: F401, F403
+from src.core.chat_engine._imports import (
+    Any,
+    ConfirmationError,
+    Dict,
+    List,
+    Optional,
+    threading,
+    time,
+)
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -238,40 +245,39 @@ class CallbackMixin(object):
                 f"模型: {self.cfg.model} | 缓存命中率: {hit_rate:.0f}% | 本次成本: \u00a5{cost:.4f} | 查询余额中..."
             )
 
+        generation, callback = self._project_generation, self.on_status_update
         def _async_check_balance():
-            global _balance_check_running
             try:
                 info = self.api.check_balance()
                 avail = info.get("available_balance", 0)
-                if self.on_status_update:
-                    self.on_status_update(
-                        f"模型: {self.cfg.model} | 缓存命中率: {hit_rate:.0f}% | 本次成本: \u00a5{cost:.4f} | 余额: \u00a5{avail:.2f}"
+                currency = info.get("currency", "CNY")
+                if callback and not self._closed and generation == self._project_generation:
+                    callback(
+                        f"模型: {self.cfg.model} | 缓存命中率: {hit_rate:.0f}% | 本次成本: \u00a5{cost:.4f} | 余额: {currency} {avail:.2f}"
                     )
             except Exception as _exc:
                 logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
             finally:
-                with _balance_running_lock:
-                    _balance_check_running = False
+                with self._balance_lock:
+                    self._balance_running = False
 
         # 防抖：避免高频调用创建过多线程（至少间隔 5 秒）
-        # 使用模块级锁 + 运行中标志，避免多线程竞态条件
-        global _balance_debounce_last_call, _balance_check_running
-        with _balance_debounce_lock:
+        # 每个引擎分别记录刷新状态，避免跨实例互相阻塞。
+        with self._balance_lock:
             now = time.monotonic()
-            if now - _balance_debounce_last_call < 5.0:
+            if now - self._balance_last_call < 5.0:
                 return
             # 检查是否已有余额查询线程在运行中
-            with _balance_running_lock:
-                if _balance_check_running:
-                    return
-                _balance_check_running = True
-            _balance_debounce_last_call = now
+            if self._balance_running:
+                return
+            self._balance_running = True
+            self._balance_last_call = now
         try:
             threading.Thread(target=_async_check_balance, daemon=True).start()
         except Exception:
             # 线程启动失败时重置标志，避免余额查询功能永久失效
-            with _balance_running_lock:
-                _balance_check_running = False
+            with self._balance_lock:
+                self._balance_running = False
 
     # ========== 控制方法 ==========
     def check_health(self) -> Dict:

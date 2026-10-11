@@ -1,0 +1,3 @@
+-r requirements-optional.lock
+ruff==0.17.0
+coverage==7.13.2

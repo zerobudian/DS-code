@@ -230,6 +230,9 @@ class Config:
             "allow_model_switch": True,  # 允许子代理选择不同模型
             "max_tokens_per_subagent": 12000,
         },
+        "custom_models": [],
+        "provider_capabilities": {},
+        "context_tokens": 128000,
         "username": "User",
         "language": "zh",           # zh / en / wenyan
         "theme": "light",              # light / dark
@@ -600,7 +603,7 @@ class Config:
                 # M-008: JSON 反序列化前检查大小，防止超大配置文件导致 OOM
                 if len(raw_bytes) > MAX_JSON_SIZE:
                     print(f"[Config] 配置文件超过 {MAX_JSON_SIZE} bytes 大小限制，使用默认配置")
-                    self.data = dict(self.DEFAULT_CONFIG)
+                    self.data = copy.deepcopy(self.DEFAULT_CONFIG)
                     return
                 try:
                     loaded = json.loads(raw_bytes.decode("utf-8"))
@@ -625,15 +628,15 @@ class Config:
             except json.JSONDecodeError as e:
                 # 配置文件损坏：回退默认，不覆盖损坏文件
                 print(f"[Config] 配置文件损坏，使用默认配置: {e}")
-                self.data = dict(self.DEFAULT_CONFIG)
+                self.data = copy.deepcopy(self.DEFAULT_CONFIG)
             except (RuntimeError, ValueError):
                 # 安全/校验类异常必须向上抛出，禁止静默回退到默认配置
                 raise
             except Exception as e:
                 print(f"[Config] 加载失败，使用默认配置: {e}")
-                self.data = dict(self.DEFAULT_CONFIG)
+                self.data = copy.deepcopy(self.DEFAULT_CONFIG)
         else:
-            self.data = dict(self.DEFAULT_CONFIG)
+            self.data = copy.deepcopy(self.DEFAULT_CONFIG)
             # 初始化：原子写一次（失败不影响后续写入能力）
             try:
                 self._save()
@@ -852,18 +855,22 @@ class Config:
         self._save()
 
     def get(self, key, default=None):
-        """通用 get —— 线程安全：在锁内读取并返回；对 dict/list 类型返回浅副本。"""
+        """Read configuration under its lock, returning detached nested values."""
         try:
             with self._instance_lock:
+                if key in {"custom_models", "provider_capabilities", "context_tokens"}:
+                    provider = self.active_provider
+                    if provider:
+                        return copy.deepcopy(provider.get(key, self.DEFAULT_CONFIG[key]))
                 if isinstance(self.data, dict) and key in self.data:
                     value = self.data[key]
                     if value is None:
                         return default
-                    # 返回不可变类型原样；对 dict/list 返回浅拷贝，避免外部修改污染内部状态
+                    # Mutable values must not expose the underlying configuration.
                     if isinstance(value, dict):
-                        return dict(value)
+                        return copy.deepcopy(value)
                     if isinstance(value, list):
-                        return list(value)
+                        return copy.deepcopy(value)
                     return value
         except Exception as _exc:
             logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
@@ -872,9 +879,12 @@ class Config:
     def set(self, key, value):
         """通用 set —— 线程安全+进程安全：持 instance_lock 更新 data，再通过 _save() 获取跨进程文件锁写入。"""
         try:
+            if key in {"model", "api_key", "base_url", "custom_models", "provider_capabilities", "context_tokens", "active_provider_index"}:
+                self.update_settings({key: self._coerce_value(key, value)})
+                return
             with self._instance_lock:
                 if not isinstance(self.data, dict):
-                    self.data = dict(self.DEFAULT_CONFIG)
+                    self.data = copy.deepcopy(self.DEFAULT_CONFIG)
                 self.data[key] = self._coerce_value(key, value)
             # _save() 内部获取跨进程文件锁后重新获取 instance_lock（RLock 可重入）
             self._save()
@@ -890,9 +900,12 @@ class Config:
     def update(self, **kwargs):
         """线程安全+进程安全的批量更新：批量应用 kwargs 后通过 _save() 原子保存。"""
         try:
+            if set(kwargs) & {"model", "api_key", "base_url", "custom_models", "provider_capabilities", "context_tokens", "providers", "active_provider_index"}:
+                self.update_settings({key: self._coerce_value(key, value) for key, value in kwargs.items()})
+                return
             with self._instance_lock:
                 if not isinstance(self.data, dict):
-                    self.data = dict(self.DEFAULT_CONFIG)
+                    self.data = copy.deepcopy(self.DEFAULT_CONFIG)
                 coerced = {k: self._coerce_value(k, v) for k, v in kwargs.items()}
                 self.data.update(coerced)
             # _save() 内部获取跨进程文件锁后重新获取 instance_lock（RLock 可重入）
@@ -918,21 +931,17 @@ class Config:
                 if providers:
                     index = self.active_provider_index
                     provider = providers[index if 0 <= index < len(providers) else 0]
-                    for key in ("model", "base_url", "api_key"):
+                    for key in ("model", "base_url", "api_key", "custom_models", "provider_capabilities", "context_tokens"):
                         if key in values:
-                            provider[key] = values[key]
+                            provider[key] = copy.deepcopy(values[key])
                 self._save()
             except Exception:
                 self.data = previous
                 raise
 
     def get_api_key(self) -> str:
-        """获取 API Key（内部解密）。线程安全。"""
-        try:
-            with self._instance_lock:
-                return self.data.get("api_key", "")
-        except Exception:
-            return ""
+        """Use the same credential selection as model requests."""
+        return self.api_key
 
     @property
     def active_provider(self) -> dict:
@@ -941,13 +950,11 @@ class Config:
             providers = self.data.get("providers")
             if not isinstance(providers, list) or not providers:
                 return {}
-            idx = self.data.get("active_provider_index", 0)
-            if not isinstance(idx, int) or idx < 0 or idx >= len(providers):
-                idx = 0
+            idx = self.active_provider_index
             p = providers[idx]
             if not isinstance(p, dict):
                 return {}
-            return dict(p)
+            return copy.deepcopy(p)
 
     @property
     def active_provider_index(self) -> int:
@@ -958,14 +965,12 @@ class Config:
             providers = self.data.get("providers", [])
             if isinstance(providers, list) and idx >= len(providers):
                 idx = max(0, len(providers) - 1)
-            return idx
+            return max(0, idx)
 
     @active_provider_index.setter
     def active_provider_index(self, value):
         value = self._coerce_value("active_provider_index", value)
-        with self._instance_lock:
-            self.data["active_provider_index"] = value
-        self._save_safe()
+        self.update_settings({"active_provider_index": value})
 
     # 快捷属性：全部线程安全，读/写持锁
     @property
@@ -976,15 +981,13 @@ class Config:
             if env_key:
                 return env_key
             active = self.active_provider
-            if active.get("api_key"):
+            if "api_key" in active:
                 return active["api_key"]
             return self.data.get("api_key", "")
 
     @api_key.setter
     def api_key(self, value):
-        with self._instance_lock:
-            self.data["api_key"] = value
-        self._save_safe()
+        self.update_settings({"api_key": str(value or "")})
 
     @property
     def model(self):
@@ -996,9 +999,7 @@ class Config:
 
     @model.setter
     def model(self, value):
-        with self._instance_lock:
-            self.data["model"] = str(value or "deepseek-v4-pro")
-        self._save_safe()
+        self.update_settings({"model": str(value or "deepseek-v4-pro")})
 
     @property
     def base_url(self) -> str:
@@ -1010,9 +1011,7 @@ class Config:
 
     @base_url.setter
     def base_url(self, value):
-        with self._instance_lock:
-            self.data["base_url"] = str(value or "https://api.deepseek.com")
-        self._save_safe()
+        self.update_settings({"base_url": str(value or "https://api.deepseek.com")})
 
     @property
     def language(self):

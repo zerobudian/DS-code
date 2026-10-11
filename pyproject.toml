@@ -1,0 +1,12 @@
+[tool.ruff.lint]
+select = ["E9", "F821", "F822", "F823", "F601", "F811", "B006", "B012", "B023"]
+
+[tool.coverage.run]
+source = ["sidecar", "src"]
+patch = ["subprocess"]
+parallel = true
+sigterm = true
+omit = ["engine/src/gui/*"]
+
+[tool.coverage.report]
+skip_empty = true

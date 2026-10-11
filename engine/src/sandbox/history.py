@@ -18,49 +18,22 @@ logger = logging.getLogger(__name__)
 import json
 import copy
 import os
-import shutil
-import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import List, Dict, Optional
+from src.core.atomic_files import atomic_write_bytes
 
 
 def _atomic_write_history(path: Path, payload: Dict) -> bool:
-    """原子化写入 history JSON：先写临时文件 -> fsync -> os.replace。
-
-    避免进程在写入中途被杀导致 session 文件残留半拉 JSON（不可恢复）。
-    """
+    """Keep the previous complete session when serialization or replacement fails."""
     target = Path(path)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-    except Exception as _exc:
-        logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-    try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".history_", suffix=".tmp", dir=str(target.parent)
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError as _exc:
-                    logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-            try:
-                os.replace(tmp_name, str(target))
-            except OSError:
-                shutil.move(tmp_name, str(target))
-            return True
-        except Exception:
-            try:
-                os.unlink(tmp_name)
-            except Exception as _exc:
-                logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
-            raise
-    except Exception as e:
-        print(f"[History] 原子写入失败 ({target}): {e}")
+        encoded = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+        return atomic_write_bytes(target, encoded)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("历史写入失败: %s", exc)
         return False
 
 
@@ -79,7 +52,7 @@ class ConversationHistory:
             logger.debug("忽略可恢复异常: %s", _exc, exc_info=True)
         # 完整消息列表, 每项: {"role": ..., "content": ..., "reasoning_content": ..., ...}
         self.messages: List[Dict] = []
-        self.current_session_file = self.dir / f"session_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        self.current_session_file = self.dir / f"session_{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns()}.json"
         self.tool_call_counter = 0  # 本轮会话中的工具调用次数 (用于新代理判定)
         self._dirty = False  # 标记是否有未保存的修改
         self._dirty_version = 0  # P0-2: 单调递增的脏版本号，用于检测快照后的并发修改
@@ -151,7 +124,7 @@ class ConversationHistory:
                     print(f"[History] 警告: {len(files)} 个 session 文件无法加载，创建新会话")
                 self.messages = []
                 self.tool_call_counter = 0
-                self.current_session_file = self.dir / f"session_{time.strftime('%Y%m%d_%H%M%S')}.json"
+                self.current_session_file = self.dir / f"session_{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns()}.json"
 
     def replace_messages(self, messages: list):
         """直接替换内存中的消息列表，不调用 _load_latest；并立刻重算 tool_call_counter。
@@ -160,7 +133,7 @@ class ConversationHistory:
         线程安全：持锁写入。
         """
         if isinstance(messages, list):
-            cleaned = [m for m in messages if isinstance(m, dict)]
+            cleaned = copy.deepcopy([m for m in messages if isinstance(m, dict)])
         else:
             cleaned = []
         tool_counter = 0
@@ -222,28 +195,8 @@ class ConversationHistory:
                 payload = {"messages": snapshot, "saved_at": time.time()}
                 ok = _atomic_write_history(target_file, payload)
                 if not ok:
-                    # 回退也使用原子写入（临时文件+rename），避免进程崩溃导致会话文件损坏
-                    import tempfile as _tmp
-                    try:
-                        target_file.parent.mkdir(parents=True, exist_ok=True)
-                        fd, tmp_path = _tmp.mkstemp(
-                            dir=str(target_file.parent),
-                            prefix=".history_",
-                            suffix=".tmp",
-                        )
-                        try:
-                            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                                json.dump(payload, f, ensure_ascii=False, indent=2)
-                            os.replace(tmp_path, str(target_file))
-                        except Exception:
-                            try:
-                                os.unlink(tmp_path)
-                            except OSError:
-                                pass
-                            raise
-                    except Exception as e2:
-                        print(f"[History] fallback 写入也失败: {e2}")
-                        return  # 写入失败，不更新 _dirty，下次重试
+                    logger.warning("历史未保存，将在下次保存时重试: %s", target_file)
+                    return  # Keep the dirty state and the previous complete file.
 
                 # P0-2 修复: 在锁内更新时间戳和脏标志，使用版本号精确检测并发修改
                 self._last_save_time = time.time()
@@ -275,7 +228,7 @@ class ConversationHistory:
             self.save()
         except Exception as e:
             print(f"[History] add_user_message 落盘失败: {e}")
-        return msg
+        return copy.deepcopy(msg)
 
     def add_assistant_message(self, content: str, reasoning_content: str = "", tool_calls: Optional[List[Dict]] = None) -> Dict:
         """保存完整助手回复（线程安全）。"""
@@ -288,7 +241,7 @@ class ConversationHistory:
         cleaned_calls: List[Dict] = []
         if isinstance(tool_calls, list) and tool_calls:
             # 过滤非 dict 项，避免下游遍历炸
-            cleaned_calls = [c for c in tool_calls if isinstance(c, dict)]
+            cleaned_calls = copy.deepcopy([c for c in tool_calls if isinstance(c, dict)])
             msg["tool_calls"] = cleaned_calls
         with self._lock:
             if not isinstance(self.messages, list):
@@ -303,9 +256,9 @@ class ConversationHistory:
             self.save()
         except Exception as e:
             print(f"[History] add_assistant_message 落盘失败: {e}")
-        return msg
+        return copy.deepcopy(msg)
 
-    def add_tool_result(self, tool_name: str, result_text: str, tool_call_id: str = "") -> Dict:
+    def add_tool_result(self, tool_name: str, result_text: str, tool_call_id: str = "", ok: Optional[bool] = None) -> Dict:
         """保存完整工具调用结果（线程安全）。"""
         msg = {
             "role": "tool",
@@ -313,6 +266,8 @@ class ConversationHistory:
             "content": str(result_text or ""),
             "timestamp": time.time(),
         }
+        if ok is not None:
+            msg["ok"] = bool(ok)
         if tool_call_id:
             msg["tool_call_id"] = tool_call_id
         with self._lock:
@@ -326,7 +281,7 @@ class ConversationHistory:
             self.save()
         except Exception as e:
             print(f"[History] add_tool_result 落盘失败: {e}")
-        return msg
+        return copy.deepcopy(msg)
 
     def snapshot(self) -> List[Dict]:
         """Return a detached snapshot for UI/API consumers."""
@@ -337,7 +292,7 @@ class ConversationHistory:
         """清空当前会话, 新建一个 session 文件（线程安全）。
         P1-3 修复: 在锁内设置 _dirty=True 并递增版本号，确保空列表被保存。
         """
-        new_path = self.dir / f"session_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        new_path = self.dir / f"session_{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns()}.json"
         with self._lock:
             self.messages = []
             self.tool_call_counter = 0

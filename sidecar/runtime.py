@@ -23,6 +23,7 @@ class ChatRun:
         "cost": 0, "cache_hit_rate": 0, "cached_tokens": 0, "total_tokens": 0,
     })
     error: dict = field(default_factory=dict)
+    tool_outcomes: dict = field(default_factory=dict)
     created: float = field(default_factory=time.monotonic)
 
     def emit(self, kind, data):
@@ -56,7 +57,7 @@ class ChatRuntime:
         # Preserve already existing names from older versions.
         return name if name in self.projects.list_projects() else safe
 
-    def start(self, project, text, continue_plan=False):
+    def start(self, project, text, continue_plan=False, attachments=None):
         with self.lock:
             self.require_idle()
             project = self.canonical(project)
@@ -68,7 +69,7 @@ class ChatRuntime:
             if len(self.runs) >= 32:
                 self.runs.pop(next(iter(self.runs)))
             self.runs[run.id] = run
-            self.worker = threading.Thread(target=self._work, args=(run, text, continue_plan),
+            self.worker = threading.Thread(target=self._work, args=(run, text, continue_plan, attachments),
                                            daemon=True, name="sidecar-chat")
             self.worker.start()
             return run
@@ -80,7 +81,9 @@ class ChatRuntime:
         engine.on_new_turn = lambda t: run.emit("new_turn", {"turn": t})
         engine.on_status_update = lambda d: run.emit("status", str(d))
         engine.on_tool_call_detected = lambda d: run.emit("tool_call", d)
-        engine.on_tool_result = lambda n, r: run.emit("tool_result", {"name": n, "result": str(r)})
+        engine.on_tool_end = lambda n, ok, result: run.tool_outcomes.update({n: bool(ok)})
+        engine.on_tool_result = lambda n, r: run.emit("tool_result", {
+            "name": n, "result": str(r), "ok": run.tool_outcomes.pop(n, None)})
         engine.on_plan_ready = lambda d: run.emit("plan_ready", str(d))
         engine.on_chat_clear_requested = lambda: run.emit("chat_clear", {})
         engine.on_confirm_command = lambda d: self._question(run, "command", d)
@@ -116,7 +119,7 @@ class ChatRuntime:
                         "edit": self.engine.confirm_edit, "answer": self.engine.submit_user_answer}
             handlers[kind](value)
 
-    def _work(self, run, text, continue_plan):
+    def _work(self, run, text, continue_plan, attachments):
         try:
             self._bind(run)
             sandbox = self.projects.get(run.project) or self.projects.create(run.project)
@@ -133,7 +136,10 @@ class ChatRuntime:
                     self.engine.confirm_plan()
                     self.engine.continue_from_plan(cancel_event=run.cancel_event)
                 else:
-                    self.engine.send_message(text, cancel_event=run.cancel_event)
+                    from .project_data import prepare_attachments
+                    context, images = prepare_attachments(sandbox, attachments or [])
+                    self.engine.send_message(text + ("\n\n" + context if context else ""),
+                                             images=images, cancel_event=run.cancel_event)
         except Exception as exc:
             run.error = {"code": 500, "message": str(exc)}
         finally:

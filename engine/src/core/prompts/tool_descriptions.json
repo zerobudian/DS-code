@@ -1607,5 +1607,289 @@
       }
     ],
     "returns": "(ok, message). Updates the conversation display name in the sidebar."
+  },
+  {
+    "name": "git_add",
+    "description": "Stage project files.",
+    "fields": [
+      {
+        "key": "files",
+        "type": "array",
+        "required": true
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "git_branch_create",
+    "description": "Create a project Git branch.",
+    "fields": [
+      {
+        "key": "branch",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "base",
+        "type": "string",
+        "required": false
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "git_branch_delete",
+    "description": "Delete a Git branch; reviewer and read-only agents cannot use this.",
+    "fields": [
+      {
+        "key": "branch",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "force",
+        "type": "boolean",
+        "required": false
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "git_reset",
+    "description": "Reset Git index/worktree. Choose soft, mixed or hard explicitly.",
+    "fields": [
+      {
+        "key": "mode",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "target",
+        "type": "string",
+        "required": false
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "git_stash",
+    "description": "Save or restore worktree changes using Git stash.",
+    "fields": [
+      {
+        "key": "action",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "message",
+        "type": "string",
+        "required": false
+      },
+      {
+        "key": "index",
+        "type": "integer",
+        "required": false
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "replace_symbol_in_files",
+    "description": "Replace a symbol using the sandbox text fallback.",
+    "fields": [
+      {
+        "key": "old_name",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "new_name",
+        "type": "string",
+        "required": true
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "shell_start",
+    "description": "Start an owned persistent shell inside the project.",
+    "fields": [],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "shell_exec",
+    "description": "Run a command in the persistent shell and wait for its exit status.",
+    "fields": [
+      {
+        "key": "command",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "timeout",
+        "type": "number",
+        "required": false
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "shell_send",
+    "description": "Send a command to the persistent shell without waiting.",
+    "fields": [
+      {
+        "key": "command",
+        "type": "string",
+        "required": true
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "shell_read",
+    "description": "Read buffered persistent shell output.",
+    "fields": [
+      {
+        "key": "clear",
+        "type": "boolean",
+        "required": false
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "shell_cd",
+    "description": "Change the persistent shell directory inside the project.",
+    "fields": [
+      {
+        "key": "path",
+        "type": "string",
+        "required": true
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "shell_stop",
+    "description": "Stop the owned persistent shell and its child processes.",
+    "fields": [],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "goto_definition",
+    "description": "Resolve a symbol definition using LSP or local fallback.",
+    "fields": [
+      {
+        "key": "file",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "line",
+        "type": "integer",
+        "required": true
+      },
+      {
+        "key": "character",
+        "type": "integer",
+        "required": true
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "find_references",
+    "description": "Find references to a symbol; positions are one-based.",
+    "fields": [
+      {
+        "key": "file",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "line",
+        "type": "integer",
+        "required": true
+      },
+      {
+        "key": "character",
+        "type": "integer",
+        "required": true
+      },
+      {
+        "key": "include_declaration",
+        "type": "boolean",
+        "required": false
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "hover_info",
+    "description": "Get documentation/type information for a symbol.",
+    "fields": [
+      {
+        "key": "file",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "line",
+        "type": "integer",
+        "required": true
+      },
+      {
+        "key": "character",
+        "type": "integer",
+        "required": true
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "get_diagnostics",
+    "description": "Read LSP diagnostics for a file.",
+    "fields": [
+      {
+        "key": "file",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "severity",
+        "type": "string",
+        "required": false
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "document_symbols",
+    "description": "List symbols in a document.",
+    "fields": [
+      {
+        "key": "file",
+        "type": "string",
+        "required": true
+      }
+    ],
+    "returns": "(ok, result text)"
+  },
+  {
+    "name": "format_document",
+    "description": "Format a document using LSP or local fallback.",
+    "fields": [
+      {
+        "key": "file",
+        "type": "string",
+        "required": true
+      },
+      {
+        "key": "apply",
+        "type": "boolean",
+        "required": false
+      }
+    ],
+    "returns": "(ok, result text)"
   }
 ]

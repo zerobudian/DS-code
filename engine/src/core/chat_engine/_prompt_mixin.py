@@ -2,7 +2,18 @@
 """SystemPromptMixin — 系统提示构建与 @文件/@符号 上下文注入（拆分自 chat_engine.py）。"""
 from __future__ import annotations
 
-from src.core.chat_engine._imports import *  # noqa: F401, F403
+from src.core.chat_engine._imports import (
+    Any,
+    Dict,
+    List,
+    Path,
+    SystemPromptBuilder,
+    Tuple,
+)
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 

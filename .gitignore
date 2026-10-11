@@ -9,3 +9,6 @@ data/*
 dscode_data/
 .DS_Store
 test-results/
+.coverage
+coverage.xml
+.coverage.*

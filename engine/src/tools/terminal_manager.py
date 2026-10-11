@@ -192,7 +192,7 @@ class TerminalManager:
         try:
             while not self._closed:
                 try:
-                    chunk = stdout.read(1024)
+                    chunk = getattr(stdout, "read1", stdout.read)(1024)
                 except Exception:
                     break
                 if not chunk:

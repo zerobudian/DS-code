@@ -56,7 +56,7 @@ class LSPClient:
         root_uri: 项目根URI，如 "file:///home/user/project"
         """
         self.root_uri = root_uri.rstrip("/") if root_uri else ""
-        self.root_path = root_uri.replace("file://", "", 1) if root_uri.startswith("file://") else root_uri
+        self.root_path = self.uri_to_path(root_uri)
         self.workspace_folders = workspace_folders or [{"uri": self.root_uri, "name": Path(self.root_path).name}]
         self._proc: Optional[subprocess.Popen] = None
         self._msg_id = 0
@@ -77,16 +77,20 @@ class LSPClient:
     def from_path(cls, path: str) -> "LSPClient":
         """从文件路径创建LSPClient"""
         abs_path = str(Path(path).resolve())
-        return cls(f"file://{abs_path}")
+        return cls(cls.path_to_uri(abs_path))
 
     @staticmethod
     def path_to_uri(path: str) -> str:
-        return "file://" + str(Path(path).resolve())
+        return Path(path).resolve().as_uri()
 
     @staticmethod
     def uri_to_path(uri: str) -> str:
         if uri.startswith("file://"):
-            return uri[7:]
+            from urllib.parse import urlsplit
+            from urllib.request import url2pathname
+            parsed = urlsplit(uri)
+            path = url2pathname(parsed.path)
+            return "//" + parsed.netloc + path if parsed.netloc else path
         return uri
 
     # ── 生命周期 ──────────────────────────────────────────────
@@ -608,7 +612,7 @@ class LSPClient:
             while not self._shutdown_requested:
                 if self._proc is None or self._proc.stderr is None:
                     break
-                chunk = self._proc.stderr.read(4096)
+                chunk = self._proc.stderr.read1(4096)
                 if not chunk:
                     break
                 # 只记录warning以上的stderr，避免日志泛滥
@@ -631,7 +635,7 @@ class LSPClient:
                 if self._proc is None or self._proc.stdout is None:
                     break
                 # 大块读取，避免逐字节read的性能问题
-                chunk = self._proc.stdout.read(4096)
+                chunk = self._proc.stdout.read1(4096)
                 if not chunk:
                     # stdout关闭，服务器退出
                     break
@@ -657,7 +661,7 @@ class LSPClient:
                                     content_length = int(line.split(":", 1)[1].strip())
                                 except ValueError:
                                     content_length = -1
-                        if content_length is None or content_length < 0:
+                        if content_length is None or content_length < 0 or content_length > 16 * 1024 * 1024:
                             # 没有Content-Length或解析失败，流可能错位，断开连接
                             logger.warning("LSP %s: invalid/missing Content-Length header, disconnecting",
                                            self._server_name)

@@ -115,6 +115,7 @@ class ToolExecutor:
     VALID_SECTIONS = {"description", "pending", "completed", "custom"}
 
     def __init__(self, sandbox, mcp_manager=None, sklii_manager=None, image_doc_manager=None, hook_manager=None, lsp_manager=None):
+        self._closed = False
         self.sandbox = sandbox
         self._mcp_manager = mcp_manager
         self._sklii_manager = sklii_manager
@@ -197,209 +198,17 @@ class ToolExecutor:
 
     # ========== 解析 & 执行 ==========
     # 单次提取最多处理多少字符，避免超长 reasoning 卡死循环
-    _MAX_TOOL_SEARCH_LEN = 120_000
-    _MAX_TOOL_CALLS = 50
-
     def extract_tool_calls(self, text):
-        """从模型输出（reasoning）中提取工具调用 JSON 数组。
+        from src.tools.text_tool_parser import extract_calls
+        return extract_calls(text, self.TOOL_NAMES)
 
-        对 None/空值/超长文本/无效 JSON 均有防御，避免下游收到异常数据。
-        """
-        calls = []
-        if not isinstance(text, str):
-            try:
-                text = str(text or "")
-            except Exception:
-                return calls
-        if not text:
-            return calls
-        # 超长文本：只扫描前段，避免推理输出数万字内容时陷入大循环
-        if len(text) > self._MAX_TOOL_SEARCH_LEN:
-            text = text[: self._MAX_TOOL_SEARCH_LEN]
-
-        idx = 0
-        safety_iter = 0
-        max_iter = max(1000, text.count('"tool"') * 3 + 16)
-        while safety_iter < max_iter:
-            safety_iter += 1
-            if len(calls) >= self._MAX_TOOL_CALLS:
-                break
-            pos = text.find('"tool"', idx)
-            if pos == -1:
-                break
-            # C-2 修复: 使用字符串感知的方式向后查找开括号，避免定位到字符串内的 {
-            open_brace = -1
-            scan_i = pos - 1
-            depth_back = 0
-            in_str_back = False
-            while scan_i >= 0:
-                ch = text[scan_i]
-                if ch == "\\" and in_str_back and scan_i > 0:
-                    # 转义字符：跳过下一个字符
-                    scan_i -= 2
-                    continue
-                if ch == '"':
-                    in_str_back = not in_str_back
-                elif not in_str_back:
-                    if ch == "}":
-                        depth_back += 1
-                    elif ch == "{":
-                        if depth_back == 0:
-                            open_brace = scan_i
-                            break
-                        depth_back -= 1
-                scan_i -= 1
-            if open_brace == -1:
-                idx = pos + 6
-                continue
-            depth = 0
-            close_brace = -1
-            in_string = False
-            i = open_brace
-            # C-1 修复: 扩大扫描窗口到 64KB，支持大型工具调用（如 create_file 携带大 content）
-            search_end = min(len(text), open_brace + 65536)
-            while i < search_end:
-                ch = text[i]
-                if ch == "\\" and in_string and i + 1 < search_end:
-                    i += 2
-                    continue
-                # JSON 标准仅使用双引号作为字符串界定符；单引号只是普通字符。
-                if ch == '"':
-                    in_string = not in_string
-                elif not in_string:
-                    if ch == "{":
-                        depth += 1
-                    elif ch == "}":
-                        depth -= 1
-                        if depth == 0:
-                            close_brace = i + 1
-                            break
-                i += 1
-            if close_brace == -1:
-                # 工具调用 JSON 未闭合（可能超过 64KB 扫描窗口）
-                logger.warning(
-                    "工具调用 JSON 未闭合，open_brace=%d, scan_window=%d, text_len=%d — 工具调用被跳过",
-                    open_brace, 65536, len(text)
-                )
-                idx = pos + 6
-                continue
-            try:
-                raw = text[open_brace:close_brace]
-            except Exception:
-                idx = pos + 6
-                continue
-            data = self._try_parse_json(raw)
-            if data and isinstance(data, dict) and data.get("tool") in self.TOOL_NAMES:
-                calls.append(data)
-                idx = close_brace
-                continue
-            try:
-                fixed = self._fix_json_newlines(raw)
-            except Exception:
-                fixed = raw
-            data = self._try_parse_json(fixed)
-            if data and isinstance(data, dict) and data.get("tool") in self.TOOL_NAMES:
-                calls.append(data)
-                idx = close_brace
-                continue
-            # C-3 修复: 移除危险的 replace("'", '"') fallback。
-            # 单引号替换会破坏含英文撇号的字符串值（如 "it's a bug" → "it"s a bug"），
-            # 导致无效 JSON 或参数错误。直接走 manual_parse fallback。
-            data = self._manual_parse(raw)
-            if data and isinstance(data, dict) and data.get("tool") in self.TOOL_NAMES:
-                calls.append(data)
-            idx = close_brace
-        return calls
-
-    @staticmethod
-    def _try_parse_json(s):
-        try:
-            return json.loads(s)
-        except Exception:
-            return None
-
-    @staticmethod
-    def _fix_json_newlines(s):
-        result = []
-        in_string = False
-        i = 0
-        while i < len(s):
-            ch = s[i]
-            if ch == "\\" and in_string and i + 1 < len(s):
-                result.append(ch)
-                result.append(s[i + 1])
-                i += 2
-                continue
-            if ch == '"':
-                if not in_string:
-                    in_string = True
-                    result.append(ch)
-                else:
-                    in_string = False
-                    result.append(ch)
-            elif in_string and ch == "\n":
-                result.append("\\n")
-            elif in_string and ch == "\r":
-                result.append("\\r")
-            elif in_string and ch == "\t":
-                result.append("\\t")
-            else:
-                result.append(ch)
-            i += 1
-        return "".join(result)
-
-    @staticmethod
-    def _manual_parse(s):
-        result = {}
-        m = re.search(r'"tool"\s*:\s*["\']([\w_]+)["\']', s)
-        if m:
-            result["tool"] = m.group(1)
-        m = re.search(r'"filename"\s*:\s*["\']([^"\']+)["\']', s)
-        if m:
-            result["filename"] = m.group(1)
-        m = re.search(r'"section"\s*:\s*["\']([\w_]+)["\']', s)
-        if m:
-            result["section"] = m.group(1)
-        m = re.search(r'"query"\s*:\s*["\']([^"\']+)["\']', s)
-        if m:
-            result["query"] = m.group(1)
-        m = re.search(r'"url"\s*:\s*["\']([^"\']+)["\']', s)
-        if m:
-            result["url"] = m.group(1)
-        m = re.search(r'"command"\s*:\s*["\']([^"\']+)["\']', s)
-        if m:
-            result["command"] = m.group(1)
-        m = re.search(r'"task"\s*:\s*["\']([^"\']+)["\']', s)
-        if m:
-            result["task"] = m.group(1)
-        m = re.search(r'"reason"\s*:\s*["\']([^"\']+)["\']', s)
-        if m:
-            result["reason"] = m.group(1)
-        m = re.search(r'"content"\s*:\s*["\']', s)
-        if m:
-            start = m.end()
-            quote_char = s[m.end() - 1]  # 记录起始引号类型
-            # 从起始位置查找匹配的闭合引号，限制搜索窗口防止跨对象匹配
-            # 搜索窗口上限取剩余字符串长度和 128KB 的较小值
-            search_end = min(len(s), start + 131072)
-            # 手动查找未转义的闭合引号
-            i = start
-            while i < search_end:
-                ch = s[i]
-                if ch == "\\" and i + 1 < search_end:
-                    i += 2
-                    continue
-                if ch == quote_char:
-                    end = i
-                    break
-                i += 1
-            else:
-                end = -1
-            if end > start:
-                content = s[start:end]
-                content = content.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
-                result["content"] = content
-        return result if "tool" in result else None
+    def shutdown(self):
+        """Release resources owned by this executor; safe to call more than once."""
+        self._closed = True
+        terminal = getattr(self, "_persistent_terminal", None)
+        if terminal is not None:
+            terminal.terminate()
+            self._persistent_terminal = None
 
     # 会修改项目状态的工具（子代理应禁止）
     _WRITE_TOOLS = frozenset({
@@ -409,7 +218,7 @@ class ToolExecutor:
         "replace_in_files", "replace_symbol_in_files", "format_code",
         "backup_workspace", "update_ds_section", "add_task", "complete_task",
         # Git 状态变更
-        "git_reset", "git_checkout", "git_stash", "git_branch_delete", "git_commit",
+        "git_reset", "git_checkout", "git_stash", "git_branch_delete", "git_commit", "git_add", "git_branch_create",
         # 快照 / 撤销
         "create_snapshot", "restore_snapshot", "undo_last",
         # 测试 / 质量检查（可能产生副作用：写入缓存、触发钩子等）
@@ -463,11 +272,13 @@ class ToolExecutor:
 
     # ========== 统一分发 ==========
     def execute(self, call):
+        if self._closed:
+            return False, "工具执行器已关闭"
         # 防御: call 必须是非空 dict
         if not isinstance(call, dict):
             return False, f"[execute] 参数格式错误: 期望 dict，实际 {type(call).__name__}"
         tool = call.get("tool", "")
-        if not tool:
+        if not isinstance(tool, str) or not tool:
             return False, "[execute] 缺少 tool 字段"
 
         # C-005：调用链审计日志（记录 tool、子代理状态、调用链长度）
@@ -513,7 +324,7 @@ class ToolExecutor:
 
         # 权限模式前置拦截（reviewer 模式禁止写/删/状态变更类工具）
         try:
-            if Config().permission_mode == "reviewer" and tool in self._REVIEWER_BLOCKED_TOOLS:
+            if Config().permission_mode == "reviewer" and tool in (self._REVIEWER_BLOCKED_TOOLS | self._WRITE_TOOLS):
                 logger.info("[AUDIT] denied tool=%s reason=reviewer_mode", tool)
                 return False, f"[{tool}] reviewer 模式禁止执行该工具"
         except Exception:
@@ -530,7 +341,7 @@ class ToolExecutor:
                 blocked, reason, injection = self._hook_manager.trigger_blocking(
                     "PreToolUse",
                     tool_name=tool,
-                    tool_input=call.get("params", {}),
+                    tool_input={k: v for k, v in call.items() if k != "tool"},
                 )
                 if blocked:
                     logger.info("[AUDIT] hook blocked tool=%s reason=%s", tool, reason)
@@ -548,7 +359,7 @@ class ToolExecutor:
                 post_results = self._hook_manager.trigger(
                     "PostToolUse",
                     tool_name=tool,
-                    tool_input=call.get("params", {}),
+                    tool_input={k: v for k, v in call.items() if k != "tool"},
                     tool_result=result_text,
                     tool_ok=result_ok,
                 )
@@ -568,298 +379,164 @@ class ToolExecutor:
 
         return result_ok, result_text
 
-    def _dispatch(self, call, tool):
-        """工具内部分发 — 返回 (ok, result)"""
-        try:
-            # --- 文件基础操作 ---
-            if tool in ("create_file", "modify_file"):
-                return self.file_tools.create_file(call)
-            elif tool == "read_file":
-                return self.file_tools.read_file(call)
-            elif tool in ("delete_file", "mark_delete"):
-                return self.file_tools.mark_delete(call)
-            elif tool == "list_files":
-                return self.file_tools.list_files()
-            elif tool == "backup_workspace":
-                return self.file_tools.backup_workspace(call)
-            elif tool == "update_ds_section":
-                return self.file_tools.update_ds_section(call)
-            elif tool == "add_task":
-                return self.file_tools.add_task(call)
-            elif tool == "complete_task":
-                return self.file_tools.complete_task(call)
+    _TOOL_ROUTES = {
+        'add_task': ('file_tools', 'add_task', True, ()),
+        'agent_progress': ('agent_tools', 'agent_progress', False, ()),
+        'all_symbols': ('code_analysis_tools', 'all_symbols', False, ()),
+        'analyze_file': ('code_analysis_tools', 'analyze_file', True, ()),
+        'analyze_symbol': ('code_analysis_tools', 'analyze_symbol', True, ()),
+        'ask_user_questions': ('command_tools', 'ask_user_questions', True, ()),
+        'backup_workspace': ('file_tools', 'backup_workspace', True, ()),
+        'calculator': ('command_tools', 'calculator', True, ()),
+        'check_types': ('quality_tools', 'check_types', True, ()),
+        'code_metrics': ('code_analysis_tools', 'code_metrics', False, ()),
+        'codebase_search': ('code_analysis_tools', 'codebase_search', True, ()),
+        'complete_task': ('file_tools', 'complete_task', True, ()),
+        'complexity_report': ('code_analysis_tools', 'complexity_report', False, ()),
+        'create_file': ('file_tools', 'create_file', True, ()),
+        'create_plan': ('agent_tools', 'create_plan', True, ()),
+        'create_snapshot': ('file_tools', 'create_snapshot', True, ()),
+        'delegate_subagent': ('agent_tools', 'delegate_subagent', True, ()),
+        'delete_file': ('file_tools', 'mark_delete', True, ()),
+        'delete_lines': ('file_tools', 'delete_lines', True, ()),
+        'docs_lookup': ('network_tools', 'docs_lookup', True, ()),
+        'document_symbols': ('lsp_tools', 'document_symbols', True, ()),
+        'edit_file': ('file_tools', 'edit_file', True, ()),
+        'execute_custom': ('command_tools', 'execute_custom', True, ()),
+        'file_intel': ('code_analysis_tools', 'file_intel', True, ()),
+        'find_files': ('file_tools', 'find_files', True, ()),
+        'find_fixme': ('file_tools', 'find_markers', True, ('FIXME',)),
+        'find_imports': ('code_analysis_tools', 'find_imports', True, ()),
+        'find_references': ('lsp_tools', 'find_references', True, ()),
+        'find_related': ('code_analysis_tools', 'find_related', True, ()),
+        'find_symbol': ('file_tools', 'find_symbol', True, ()),
+        'find_todo': ('file_tools', 'find_markers', True, ('TODO',)),
+        'format_code': ('quality_tools', 'format_code', True, ()),
+        'format_document': ('lsp_tools', 'format_document', True, ()),
+        'get_diagnostics': ('lsp_tools', 'get_diagnostics', True, ()),
+        'git_add': ('git_tools', 'git_add', True, ()),
+        'git_branch': ('git_tools', 'git_branch', True, ()),
+        'git_branch_create': ('git_tools', 'git_branch_create', True, ()),
+        'git_branch_delete': ('git_tools', 'git_branch_delete', True, ()),
+        'git_checkout': ('git_tools', 'git_checkout', True, ()),
+        'git_commit': ('git_tools', 'git_commit', True, ()),
+        'git_diff': ('git_tools', 'git_diff', True, ()),
+        'git_log': ('git_tools', 'git_log', True, ()),
+        'git_reset': ('git_tools', 'git_reset', True, ()),
+        'git_stash': ('git_tools', 'git_stash', True, ()),
+        'git_status': ('git_tools', 'git_status', True, ()),
+        'goto_definition': ('lsp_tools', 'goto_definition', True, ()),
+        'hover_info': ('lsp_tools', 'hover_info', True, ()),
+        'impact_analysis': ('code_analysis_tools', 'impact_analysis', True, ()),
+        'insert_lines': ('file_tools', 'insert_lines', True, ()),
+        'lint_code': ('quality_tools', 'lint_code', True, ()),
+        'list_files': ('file_tools', 'list_files', False, ()),
+        'list_snapshots': ('file_tools', 'list_snapshots', False, ()),
+        'list_uploaded_images': ('image_tools', 'list_images', True, ()),
+        'mark_delete': ('file_tools', 'mark_delete', True, ()),
+        'mark_step_done': ('agent_tools', 'mark_step_done', True, ()),
+        'mcp_add': ('network_tools', 'mcp_add', True, ()),
+        'mcp_enable': ('network_tools', 'mcp_enable', True, ()),
+        'mcp_list': ('network_tools', 'mcp_list', True, ()),
+        'mcp_remove': ('network_tools', 'mcp_remove', True, ()),
+        'mcp_stop': ('network_tools', 'mcp_stop', True, ()),
+        'modify_file': ('file_tools', 'create_file', True, ()),
+        'parse_document': ('image_tools', 'parse_doc', True, ()),
+        'parse_document_images': ('image_tools', 'parse_doc_images', True, ()),
+        'parse_document_text': ('image_tools', 'parse_doc_text', True, ()),
+        'project_brief': ('code_analysis_tools', 'project_brief', False, ()),
+        'quick_syntax_check': ('quality_tools', 'quick_syntax_check', True, ()),
+        'read_file': ('file_tools', 'read_file', True, ()),
+        'rename_symbol': ('lsp_tools', 'rename_symbol', True, ()),
+        'replace_in_files': ('file_tools', 'replace_in_files', True, ()),
+        'replace_symbol_in_files': ('file_tools', 'rename_symbol', True, ()),
+        'restore_snapshot': ('file_tools', 'restore_snapshot', True, ()),
+        'revise_plan': ('agent_tools', 'revise_plan', True, ()),
+        'risk_files': ('code_analysis_tools', 'risk_files', False, ()),
+        'run_agents': ('agent_tools', 'run_agents', True, ()),
+        'run_command': ('command_tools', 'run_command', True, ()),
+        'run_command_stream': ('command_tools', 'run_command_stream', True, ()),
+        'run_tests': ('quality_tools', 'run_tests', True, ()),
+        'search_code': ('file_tools', 'search_code', True, ()),
+        'shell_cd': ('command_tools', 'shell_cd', True, ()),
+        'shell_exec': ('command_tools', 'shell_exec', True, ()),
+        'shell_read': ('command_tools', 'shell_read', True, ()),
+        'shell_send': ('command_tools', 'shell_send', True, ()),
+        'shell_start': ('command_tools', 'shell_start', True, ()),
+        'shell_stop': ('command_tools', 'shell_stop', True, ()),
+        'show_call_chain': ('code_analysis_tools', 'show_call_chain', True, ()),
+        'show_dependencies': ('code_analysis_tools', 'show_dependencies', False, ()),
+        'show_plan': ('agent_tools', 'show_plan', False, ()),
+        'sklii_call': ('sklii_tools', 'sklii_call', True, ()),
+        'sklii_create': ('sklii_tools', 'sklii_create', True, ()),
+        'sklii_list': ('sklii_tools', 'sklii_list', False, ()),
+        'undo_last': ('file_tools', 'undo_last', True, ()),
+        'update_ds_section': ('file_tools', 'update_ds_section', True, ()),
+        'validate_all': ('quality_tools', 'validate_all', True, ()),
+        'validate_file': ('quality_tools', 'validate_file', True, ()),
+        'view_image': ('image_tools', 'view_image', True, ()),
+        'web_fetch': ('network_tools', 'web_fetch', True, ()),
+        'web_search': ('network_tools', 'web_search', True, ()),
+    }
 
-            # --- 网络工具 ---
-            elif tool == "web_search":
-                return self.network_tools.web_search(call)
-            elif tool == "web_fetch":
-                return self.network_tools.web_fetch(call)
-            elif tool == "http_request":
+    def _dispatch(self, call, tool):
+        """Dispatch registered tools after centralized permission and hook checks."""
+        try:
+            route = self._TOOL_ROUTES.get(tool)
+            if route:
+                owner, method, takes_call, extras = route
+                args = ((call,) if takes_call else ()) + extras
+                return getattr(getattr(self, owner), method)(*args)
+            if tool == 'http_request':
                 result = self.network_tools.http_request(call)
                 if isinstance(result, dict):
-                    ok = bool(result.get("ok", False))
-                    status_code = result.get("status_code", "n/a")
-                    headers = result.get("headers") or {}
-                    body = str(result.get("body", ""))
-                    error = result.get("error")
-                    lines = ["[http_request] " + str(call.get("method", "GET")) + " " + str(call.get("url", ""))]
-                    lines.append("status: " + str(status_code))
+                    ok = bool(result.get('ok', False))
+                    status_code = result.get('status_code', 'n/a')
+                    headers = result.get('headers') or {}
+                    body = str(result.get('body', ''))
+                    error = result.get('error')
+                    lines = ['[http_request] ' + str(call.get('method', 'GET')) + ' ' + str(call.get('url', ''))]
+                    lines.append('status: ' + str(status_code))
                     if headers:
-                        hs = headers.items() if hasattr(headers, "items") else []
-                        lines.append("headers:")
+                        hs = headers.items() if hasattr(headers, 'items') else []
+                        lines.append('headers:')
                         for k, v in list(hs)[:10]:
-                            lines.append("  " + str(k) + ": " + str(v)[:160])
-                    lines.append("body:")
+                            lines.append('  ' + str(k) + ': ' + str(v)[:160])
+                    lines.append('body:')
                     lines.append(body[:4000])
                     if error:
-                        lines.append("error: " + str(error))
-                    return ok, "\n".join(lines)
+                        lines.append('error: ' + str(error))
+                    return (ok, '\n'.join(lines))
                 return result
-            elif tool == "docs_lookup":
-                return self.network_tools.docs_lookup(call)
-
-            # --- 命令执行 ---
-            elif tool == "run_command":
-                return self.command_tools.run_command(call)
-            elif tool == "run_command_stream":
-                return self.command_tools.run_command_stream(call)
-            elif tool == "calculator":
-                return self.command_tools.calculator(call)
-            elif tool == "execute_custom":
-                return self.command_tools.execute_custom(call)
-
-            # --- 持久终端会话 ---
-            elif tool == "shell_start":
-                return self.command_tools.shell_start(call)
-            elif tool == "shell_exec":
-                return self.command_tools.shell_exec(call)
-            elif tool == "shell_send":
-                return self.command_tools.shell_send(call)
-            elif tool == "shell_read":
-                return self.command_tools.shell_read(call)
-            elif tool == "shell_cd":
-                return self.command_tools.shell_cd(call)
-            elif tool == "shell_stop":
-                return self.command_tools.shell_stop(call)
-
-            # --- Git 工具集 ---
-            elif tool == "git_status":
-                return self.git_tools.git_status(call)
-            elif tool == "git_diff":
-                return self.git_tools.git_diff(call)
-            elif tool == "git_commit":
-                return self.git_tools.git_commit(call)
-            elif tool == "git_add":
-                return self.git_tools.git_add(call)
-            elif tool == "git_branch":
-                return self.git_tools.git_branch(call)
-            elif tool == "git_branch_create":
-                return self.git_tools.git_branch_create(call)
-            elif tool == "git_branch_delete":
-                return self.git_tools.git_branch_delete(call)
-            elif tool == "git_log":
-                return self.git_tools.git_log(call)
-            elif tool == "git_checkout":
-                return self.git_tools.git_checkout(call)
-            elif tool == "git_stash":
-                return self.git_tools.git_stash(call)
-            elif tool == "git_reset":
-                return self.git_tools.git_reset(call)
-
-            # --- MCP / 用户提问 ---
-            elif tool in ("mcp_call", "mcp_start"):
-                # C-005：子代理/受限上下文禁止 MCP 命令类操作
-                if self._subagent_restrictions.get("forbid_commands", False):
-                    logger.info("[AUDIT] denied tool=%s reason=forbid_commands", tool)
-                    return False, f"[{tool}] 已禁用 (子代理不可执行 MCP 命令)"
-                if tool == "mcp_call":
+            if tool in ('mcp_call', 'mcp_start'):
+                if self._subagent_restrictions.get('forbid_commands', False):
+                    logger.info('[AUDIT] denied tool=%s reason=forbid_commands', tool)
+                    return (False, f'[{tool}] 已禁用 (子代理不可执行 MCP 命令)')
+                if tool == 'mcp_call':
                     return self.network_tools.mcp_call(call)
                 return self.network_tools.mcp_start(call)
-            elif tool == "mcp_list":
-                return self.network_tools.mcp_list(call)
-            elif tool == "mcp_add":
-                return self.network_tools.mcp_add(call)
-            elif tool == "mcp_remove":
-                return self.network_tools.mcp_remove(call)
-            elif tool == "mcp_enable":
-                return self.network_tools.mcp_enable(call)
-            elif tool == "mcp_stop":
-                return self.network_tools.mcp_stop(call)
-            elif tool == "ask_user_questions":
-                return self.command_tools.ask_user_questions(call)
-            elif tool == "exit_conversation":
-                return True, "[exit_conversation] " + str(call.get("reason", ""))
-
-            # --- 快照 / 撤销 ---
-            elif tool == "create_snapshot":
-                return self.file_tools.create_snapshot(call)
-            elif tool == "restore_snapshot":
-                return self.file_tools.restore_snapshot(call)
-            elif tool == "list_snapshots":
-                return self.file_tools.list_snapshots()
-            elif tool == "undo_last":
-                return self.file_tools.undo_last(call)
-
-            # --- 子代理 ---
-            elif tool == "delegate_subagent":
-                return self.agent_tools.delegate_subagent(call)
-
-            # --- 子代理工具（parallel sub-agents）---
-            elif tool == "start_subagent":
-                return self._handle_subagent_tool("start_subagent", call)
-            elif tool == "list_subagents":
-                return self._handle_subagent_tool("list_subagents", call)
-            elif tool == "get_subagent_results":
-                return self._handle_subagent_tool("get_subagent_results", call)
-            elif tool == "stop_subagent":
-                return self._handle_subagent_tool("stop_subagent", call)
-
-            # --- 代码搜索 ---
-            elif tool == "search_code":
-                return self.file_tools.search_code(call)
-            elif tool == "find_symbol":
-                return self.file_tools.find_symbol(call)
-            elif tool == "find_files":
-                return self.file_tools.find_files(call)
-            elif tool == "find_todo":
-                return self.file_tools.find_markers(call, "TODO")
-            elif tool == "find_fixme":
-                return self.file_tools.find_markers(call, "FIXME")
-
-            # --- 代码编辑 ---
-            elif tool == "edit_file":
-                return self.file_tools.edit_file(call)
-            elif tool == "insert_lines":
-                return self.file_tools.insert_lines(call)
-            elif tool == "delete_lines":
-                return self.file_tools.delete_lines(call)
-            elif tool == "replace_in_files":
-                return self.file_tools.replace_in_files(call)
-            elif tool == "replace_symbol_in_files":
-                return self.file_tools.rename_symbol(call)
-
-            # --- 代码分析 ---
-            elif tool == "analyze_file":
-                return self.code_analysis_tools.analyze_file(call)
-            elif tool == "find_imports":
-                return self.code_analysis_tools.find_imports(call)
-            elif tool == "show_call_chain":
-                return self.code_analysis_tools.show_call_chain(call)
-            elif tool == "code_metrics":
-                return self.code_analysis_tools.code_metrics()
-            elif tool == "show_dependencies":
-                return self.code_analysis_tools.show_dependencies()
-
-            # --- 测试 / 质量 / 格式化 ---
-            elif tool == "run_tests":
-                return self.quality_tools.run_tests(call)
-            elif tool == "lint_code":
-                return self.quality_tools.lint_code(call)
-            elif tool == "check_types":
-                return self.quality_tools.check_types(call)
-            elif tool == "format_code":
-                return self.quality_tools.format_code(call)
-
-            # --- 代码分析层 (CodeIntel) ---
-            elif tool == "project_brief":
-                return self.code_analysis_tools.project_brief()
-            elif tool == "file_intel":
-                return self.code_analysis_tools.file_intel(call)
-            elif tool == "find_related":
-                return self.code_analysis_tools.find_related(call)
-            elif tool == "analyze_symbol":
-                return self.code_analysis_tools.analyze_symbol(call)
-            elif tool == "impact_analysis":
-                return self.code_analysis_tools.impact_analysis(call)
-            elif tool == "all_symbols":
-                return self.code_analysis_tools.all_symbols()
-            elif tool == "complexity_report":
-                return self.code_analysis_tools.complexity_report()
-            elif tool == "risk_files":
-                return self.code_analysis_tools.risk_files()
-            elif tool == "codebase_search":
-                return self.code_analysis_tools.codebase_search(call)
-
-            # --- LSP真实Language Server工具 ---
-            elif tool == "goto_definition":
-                return self.lsp_tools.goto_definition(call)
-            elif tool == "find_references":
-                return self.lsp_tools.find_references(call)
-            elif tool == "hover_info":
-                return self.lsp_tools.hover_info(call)
-            elif tool == "get_diagnostics":
-                return self.lsp_tools.get_diagnostics(call)
-            elif tool == "document_symbols":
-                return self.lsp_tools.document_symbols(call)
-            elif tool == "rename_symbol":
-                return self.lsp_tools.rename_symbol(call)
-            elif tool == "format_document":
-                return self.lsp_tools.format_document(call)
-
-            # --- 自动验证 ---
-            elif tool == "validate_all":
-                return self.quality_tools.validate_all(call)
-            elif tool == "validate_file":
-                return self.quality_tools.validate_file(call)
-            elif tool == "quick_syntax_check":
-                return self.quality_tools.quick_syntax_check(call)
-
-            # --- 多代理 ---
-            elif tool == "create_plan":
-                return self.agent_tools.create_plan(call)
-            elif tool == "revise_plan":
-                return self.agent_tools.revise_plan(call)
-            elif tool == "show_plan":
-                return self.agent_tools.show_plan()
-            elif tool == "run_agents":
-                return self.agent_tools.run_agents(call)
-            elif tool == "agent_progress":
-                return self.agent_tools.agent_progress()
-            elif tool == "mark_step_done":
-                return self.agent_tools.mark_step_done(call)
-
-            # --- 图片 / 文档解析工具 ---
-            elif tool == "view_image":
-                return self.image_tools.view_image(call)
-            elif tool == "list_uploaded_images":
-                return self.image_tools.list_images(call)
-            elif tool == "parse_document_text":
-                return self.image_tools.parse_doc_text(call)
-            elif tool == "parse_document_images":
-                return self.image_tools.parse_doc_images(call)
-            elif tool == "parse_document":
-                return self.image_tools.parse_doc(call)
-
-            # --- sklii 自定义工具包 ---
-            elif tool == "sklii_call":
-                return self.sklii_tools.sklii_call(call)
-            elif tool == "sklii_create":
-                return self.sklii_tools.sklii_create(call)
-            elif tool == "sklii_list":
-                return self.sklii_tools.sklii_list()
-
-            # --- Lessons / Notes (Constitutional) ---
-            elif tool == "record_lesson":
-                return self.lesson_tools.record_lesson(
-                    call.get("title", ""),
-                    call.get("content", ""),
-                    call.get("tags", ""),
-                )
-            elif tool == "list_lessons":
-                return self.lesson_tools.list_lessons(
-                    call.get("tag", ""),
-                    call.get("search", ""),
-                )
-            elif tool == "delete_lesson":
-                return self.lesson_tools.delete_lesson(call.get("title", ""))
-
-            elif tool == "set_conversation_title":
+            if tool == 'exit_conversation':
+                return (True, '[exit_conversation] ' + str(call.get('reason', '')))
+            if tool == 'start_subagent':
+                return self._handle_subagent_tool('start_subagent', call)
+            if tool == 'list_subagents':
+                return self._handle_subagent_tool('list_subagents', call)
+            if tool == 'get_subagent_results':
+                return self._handle_subagent_tool('get_subagent_results', call)
+            if tool == 'stop_subagent':
+                return self._handle_subagent_tool('stop_subagent', call)
+            if tool == 'record_lesson':
+                return self.lesson_tools.record_lesson(call.get('title', ''), call.get('content', ''), call.get('tags', ''))
+            if tool == 'list_lessons':
+                return self.lesson_tools.list_lessons(call.get('tag', ''), call.get('search', ''))
+            if tool == 'delete_lesson':
+                return self.lesson_tools.delete_lesson(call.get('title', ''))
+            if tool == 'set_conversation_title':
                 return self._set_conversation_title(call)
+            return False, "未知工具: " + str(tool)
+        except Exception as exc:
+            return False, "执行异常: " + str(exc)
 
-            else:
-                return False, "未知工具: " + str(tool)
-        except Exception as e:
-            return False, "执行异常: " + str(e)
 
     # ========== 子代理辅助方法 ==========
     def _handle_subagent_tool(self, tool_name: str, call: dict) -> tuple:
