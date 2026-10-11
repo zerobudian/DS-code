@@ -214,9 +214,11 @@ class ConversationHistory:
         if len(self.messages) > self._MAX_MESSAGES:
             self.messages = self.messages[-self._MAX_MESSAGES:]
 
-    def add_user_message(self, content: str) -> Dict:
+    def add_user_message(self, content: str, display_content: Optional[str] = None) -> Dict:
         """保存完整用户消息（线程安全）。"""
         msg = {"role": "user", "content": str(content or ""), "timestamp": time.time()}
+        if display_content is not None:
+            msg["display_content"] = str(display_content)
         with self._lock:
             if not isinstance(self.messages, list):
                 self.messages = []

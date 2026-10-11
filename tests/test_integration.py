@@ -160,3 +160,8 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(any('附件内容进入模型' in p.get('text','') for p in parts))
         self.assertNotIn('thinking',request)
         self.assertNotIn('reasoning_effort',request)
+        self.assertTrue(all('display_content' not in m for m in request['messages']))
+        history = self.api('GET','/api/projects/attachments/history')[1]['messages']
+        user = next(m for m in history if m['role'] == 'user')
+        self.assertEqual(user['display_content'], 'analyze attachments')
+        self.assertIn('附件内容进入模型', user['content'])

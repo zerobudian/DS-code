@@ -139,7 +139,7 @@ function loadHistory(){
     if(cp!==project||busy||!d)return;clearMsgs();
     var lastAI=null;
     (d.messages||[]).forEach(function(m){
-      if(m.role==='user'){addBub('user',m.content||'');lastAI=null;}
+      if(m.role==='user'){addBub('user',m.display_content??m.content??'');lastAI=null;}
       if(m.role==='assistant'){var bub=addAI();lastAI=bub;if(m.reasoning_content)appendRsn(bub,m.reasoning_content);if(m.content)appendAI(bub,m.content);(m.tool_calls||[]).forEach(function(call){addTC(bub,call);});markDone(bub);}
       if(m.role==='tool'&&lastAI)endTC(lastAI,{name:m.name,result:m.content,ok:m.ok});
     });

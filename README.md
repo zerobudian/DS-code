@@ -15,7 +15,7 @@ npm ci
 
 macOS/Linux 使用 `./start.sh`；Windows 安装依赖后运行 `npm start`，虚拟环境 Python 位于 `.venv/Scripts/python.exe`。`requirements.txt` 定义依赖范围，`requirements.lock` 保存本次验证的精确版本。
 
-MCP、图片处理与旧 Qt 界面需要可选运行依赖：`.venv/bin/python -m pip install -r requirements-optional.lock`。开发和完整验证使用 `requirements-dev.txt`，其中包含可选依赖、Ruff 和 coverage。
+MCP、图片处理与旧 Qt 界面需要可选运行依赖：`.venv/bin/python -m pip install -r requirements-optional.lock`。开发和完整验证使用 `requirements-dev.txt`，其中包含可选依赖、Ruff 和 coverage。Ubuntu 上 Qt 还需要 `libegl1`、`libopengl0` 系统库。
 
 Electron 负责启动一个 Sidecar、检查 HTTP 健康状态、随后加载界面；关闭窗口时只清理自己创建的进程。端口已占用会报告启动失败。`npm run dev` 打开开发工具，不会另起一个 Sidecar。旧 demo 目录中的启动脚本会转发到根目录。
 

@@ -139,7 +139,7 @@ class ChatRuntime:
                     from .project_data import prepare_attachments
                     context, images = prepare_attachments(sandbox, attachments or [])
                     self.engine.send_message(text + ("\n\n" + context if context else ""),
-                                             images=images, cancel_event=run.cancel_event)
+                                             images=images, cancel_event=run.cancel_event, display_text=text)
         except Exception as exc:
             run.error = {"code": 500, "message": str(exc)}
         finally:

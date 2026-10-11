@@ -33,7 +33,7 @@ class Engine:
     def set_project(self, sb): self.sandbox = sb
     def set_mode(self, mode): self.mode = mode
     def get_mode(self): return self.mode
-    def send_message(self, text, cancel_event=None, images=None):
+    def send_message(self, text, cancel_event=None, images=None, display_text=None):
         self.started.set()
         if text == 'confirm':
             self.confirmed = self._gate.wait_for_command_confirmation({'command': 'echo hello'}, self.on_confirm_command)

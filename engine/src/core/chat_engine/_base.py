@@ -865,7 +865,7 @@ class ChatEngineBase(object):
         return self._send_in_progress
 
     def send_message(self, user_text: str, uploaded_files: Optional[List[str]] = None,
-                     images: Optional[List[str]] = None, cancel_event=None):
+                     images: Optional[List[str]] = None, cancel_event=None, display_text=None):
         """发送用户消息入口。防止按钮重复提交，若已有请求在处理中则直接拒绝。"""
         if not self._send_lock.acquire(blocking=False):
             logger.warning("拒绝重复发送：已有请求正在处理中")
@@ -877,14 +877,14 @@ class ChatEngineBase(object):
             self._active_cancel_event = cancel_event
             if cancel_event is not None and cancel_event.is_set():
                 return
-            return self._send_message_impl(user_text, uploaded_files, images)
+            return self._send_message_impl(user_text, uploaded_files, images, display_text)
         finally:
             self._active_cancel_event = None
             self._send_in_progress = False
             self._send_lock.release()
 
     def _send_message_impl(self, user_text: str, uploaded_files: Optional[List[str]] = None,
-                     images: Optional[List[str]] = None):
+                     images: Optional[List[str]] = None, display_text=None):
         """发送用户消息 -> 斜杠命令或两阶段 (Planning / Execution)
 
         对 history/sandbox/API 调用异常均有防御，确保中途异常不会让 history 内存状态与磁盘不一致。
@@ -1058,7 +1058,7 @@ class ChatEngineBase(object):
                     self.on_error(0, "历史记录未初始化")
                 return
             try:
-                self.history.add_user_message(full_user_text)
+                self.history.add_user_message(full_user_text, display_content=display_text if display_text is not None else user_text)
             except Exception as e:
                 print(f"[ChatEngine] history.add_user_message 失败: {e}")
                 if self.on_error:
